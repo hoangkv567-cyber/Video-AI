@@ -48,6 +48,18 @@ Brief → Chủ đề có nguồn → VideoPlan JSON → Keyframe
 - TTS production: Google Cloud Text-to-Speech, mặc định `vi-VN-Neural2-A` và `en-US-Neural2-F`; dùng SSML marks để lấy timestamp caption. [Voices](https://cloud.google.com/text-to-speech/docs/voices), [SSML timepoints](https://docs.cloud.google.com/text-to-speech/docs/ssml)
 - Âm thanh native của Veo bị loại bỏ; master hình ảnh không có thoại, chữ, logo hay lip-sync. Voice-over, caption và metadata được ghép riêng cho từng ngôn ngữ.
 
+### Chế độ miễn phí (mặc định từ 21/08/2026)
+
+Ưu tiên API free-tier; các adapter trả phí (Veo, Google Cloud TTS) vẫn giữ trong code và bật lại qua cấu hình:
+
+- Nghiên cứu và kịch bản: Gemini Flash free tier (giới hạn TPM/RPD); Groq `llama-3.3-70b-versatile` là provider thay thế khi hết quota.
+- Keyframe/thumbnail: Gemini image — kiểm tra hạn mức free tier lúc probe; nếu hết quota thì xếp hàng chờ ngày kế tiếp thay vì chuyển sang trả phí.
+- Video: **Veo không có free tier**, nên `VIDEO_PROVIDER=keyframe_motion` — dựng chuyển động từ keyframe bằng FFmpeg (Ken Burns zoompan/parallax), giữ nguyên cấu trúc 5 cảnh × 8 giây và crossfade 0,3 giây. Veo là tùy chọn trả phí bật lại sau.
+- TTS tiếng Anh: Groq Orpheus (`canopylabs/orpheus-v1-english`, free dev tier, giới hạn 200 ký tự/request nên phải chunk theo câu).
+- TTS tiếng Việt: Groq **không hỗ trợ tiếng Việt**, dùng `edge-tts` (`vi-VN-HoaiMyNeural`, miễn phí, không cần key; endpoint không chính thức nên phải có provider interface để thay bằng Google Cloud TTS free tier 1 triệu ký tự/tháng khi cần độ ổn định).
+- Timestamp caption: không dựa vào SSML marks nữa — audio sinh xong được đưa qua Groq Whisper (`whisper-large-v3`, free tier) lấy word timestamps cho cả VI/EN.
+- Cost ledger vẫn ghi mọi lượt gọi với `amount_usd=0` kèm đếm quota (RPM/RPD) để biết khi nào chạm trần free tier; hard cap 6 USD chỉ áp dụng khi bật adapter trả phí.
+
 ## 2. Luồng nghiệp vụ, dữ liệu và giao diện
 
 ### Nghiên cứu và viết kịch bản

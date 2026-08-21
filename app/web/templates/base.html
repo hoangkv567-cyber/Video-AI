@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Video AI{% endblock %} · Video AI</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <span class="brand">🎬 Video AI</span>
+  <nav>
+    <a href="/">Tổng quan</a>
+    <a href="/connections">Kết nối kênh</a>
+    <a href="/briefs/new">Brief mới</a>
+    <a href="/publishing">Xuất bản</a>
+  </nav>
+  <div class="userbox">
+    {% if current_user %}
+      <span class="muted">{{ current_user.name }} · {{ current_user.role }}</span>
+      <form method="post" action="/logout" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-ghost">Đăng xuất</button>
+      </form>
+    {% else %}
+      <a href="/login">Đăng nhập</a>
+    {% endif %}
+  </div>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer class="muted">Giờ hiển thị theo Asia/Ho_Chi_Minh · dữ liệu lưu UTC</footer>
+</body>
+</html>

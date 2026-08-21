@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Tổng quan{% endblock %}
+{% block content %}
+<h1>Tổng quan</h1>
+
+<section class="statrow">
+  {% for state, count in state_counts.items() %}
+  <div class="stat">
+    <span class="badge state-{{ state }}">{{ state_labels.get(state, state) }}</span>
+    <strong>{{ count }}</strong>
+  </div>
+  {% else %}
+  <p class="muted">Chưa có creative nào. <a href="/briefs/new">Tạo brief mới</a>.</p>
+  {% endfor %}
+</section>
+
+<section class="card">
+  <h2>Danh sách creative</h2>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Chủ đề</th>
+          <th>Chiến dịch</th>
+          <th>Trạng thái</th>
+          <th>Chế độ</th>
+          <th>Chi phí dự kiến</th>
+          <th>Chi phí thực tế</th>
+          <th>Trần chi phí</th>
+          <th>Cập nhật</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in creatives %}
+        {% set cost = costs.get(c.id, {"projected": 0.0, "actual": 0.0}) %}
+        <tr>
+          <td><a href="/creatives/{{ c.id }}">{{ c.topic_title or "(chưa có chủ đề)" }}</a></td>
+          <td>{{ campaigns.get(c.campaign_id).name if campaigns.get(c.campaign_id) else "—" }}</td>
+          <td><span class="badge state-{{ c.state }}">{{ state_labels.get(c.state, c.state) }}</span></td>
+          <td>{{ "Tự động" if c.mode == "auto" else "Thủ công" }}</td>
+          <td>${{ "%.2f"|format(cost.projected) }}</td>
+          <td>${{ "%.2f"|format(cost.actual) }}</td>
+          <td>${{ "%.2f"|format(c.cost_cap_usd) }}</td>
+          <td>{{ c.updated_at|hcm_time }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="muted">Trống</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

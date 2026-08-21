@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% block title %}{{ creative.topic_title or "Creative" }}{% endblock %}
+{% block content %}
+<h1>{{ creative.topic_title or "(chưa có chủ đề)" }}</h1>
+<p>
+  <span class="badge state-{{ creative.state }}">{{ state_labels.get(creative.state, creative.state) }}</span>
+  <span class="badge">{{ "Tự động" if creative.mode == "auto" else "Thủ công" }}</span>
+</p>
+{% if creative.angle %}<p class="muted">Góc tiếp cận: {{ creative.angle }}</p>{% endif %}
+
+<section class="card">
+  <h2>Nguồn tham khảo</h2>
+  <ul class="sources">
+    {% for s in sources %}
+    <li>
+      <a href="{{ s.url }}" rel="noopener noreferrer" target="_blank">{{ s.title or s.url }}</a>
+      {% if s.is_official %}<span class="badge cap-DIRECT">Nguồn chính thức</span>{% endif %}
+      <span class="muted">· {{ s.publisher or "?" }} · truy cập {{ s.accessed_at|hcm_time }}</span>
+    </li>
+    {% else %}
+    <li class="muted">Chưa có nguồn — chế độ tự động sẽ bị chặn.</li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="card">
+  <h2>Chi phí</h2>
+  <div class="statrow">
+    <div class="stat"><span>Chi phí dự kiến</span><strong>${{ "%.2f"|format(costs.projected) }}</strong></div>
+    <div class="stat"><span>Chi phí thực tế</span><strong>${{ "%.2f"|format(costs.actual) }}</strong></div>
+    <div class="stat"><span>Trần chi phí</span><strong>${{ "%.2f"|format(creative.cost_cap_usd) }}</strong></div>
+    <div class="stat"><span>Còn lại</span><strong>${{ "%.2f"|format(creative.cost_cap_usd - costs.actual) }}</strong></div>
+  </div>
+  {% if creative.cost_cap_override_reason %}
+  <p class="muted">Lý do override trần chi phí: {{ creative.cost_cap_override_reason }}</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Kịch bản &amp; lời thoại</h2>
+  {% if script_version %}
+  <p class="muted">
+    Phiên bản {{ script_version.version }}
+    {% if script_version.is_approved %}· <span class="badge cap-DIRECT">Đã duyệt</span>{% else %}· chưa duyệt{% endif %}
+  </p>
+  <form hx-patch="/api/v1/scripts/{{ script_version.id }}" hx-ext="json-enc" hx-target="#script-save-result" hx-swap="innerHTML">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% for row in scene_rows %}
+    <fieldset class="scene">
+      <legend>
+        Cảnh {{ row.index + 1 }}
+        {% if row.scene %}
+        <span class="badge scene-{{ row.scene.status }}">{{ row.scene.status }}</span>
+        {% if row.scene.is_hero %}<span class="badge">hero</span>{% endif %}
+        {% endif %}
+      </legend>
+      {% if row.plan %}
+      <p class="muted small">Hình ảnh: {{ row.plan.get("visual_prompt_en", "") }}</p>
+      {% endif %}
+      <div class="cols">
+        <label>Lời thoại (VI)
+          <textarea name="narration_vi_{{ row.index }}" rows="3" {% if not can_edit %}readonly{% endif %}>{{ row.narration_vi }}</textarea>
+        </label>
+        <label>Lời thoại (EN)
+          <textarea name="narration_en_{{ row.index }}" rows="3" {% if not can_edit %}readonly{% endif %}>{{ row.narration_en }}</textarea>
+        </label>
+      </div>
+      <div class="cols">
+        <label>Chữ trên màn hình (VI)
+          <input type="text" name="on_screen_vi_{{ row.index }}" value="{{ row.on_screen_vi }}" {% if not can_edit %}readonly{% endif %}>
+        </label>
+        <label>Chữ trên màn hình (EN)
+          <input type="text" name="on_screen_en_{{ row.index }}" value="{{ row.on_screen_en }}" {% if not can_edit %}readonly{% endif %}>
+        </label>
+      </div>
+      {% if row.scene and row.scene.status == "failed" and can_edit %}
+      <button type="button" class="btn btn-warn"
+              hx-post="/api/v1/creatives/{{ creative.id }}/generate"
+              hx-vals='{"scene_index": {{ row.index }}}'
+              hx-target="#script-save-result" hx-swap="innerHTML">
+        Thử lại cảnh {{ row.index + 1 }}
+      </button>
+      {% endif %}
+      {% if row.scene and row.scene.last_error %}
+      <p class="error small">Lỗi: {{ row.scene.last_error.get("message", row.scene.last_error) }}</p>
+      {% endif %}
+    </fieldset>
+    {% endfor %}
+    {% if can_edit %}
+    <button type="submit" class="btn btn-primary">Lưu kịch bản</button>
+    <button type="button" class="btn"
+            hx-post="/api/v1/creatives/{{ creative.id }}/generate"
+            hx-target="#script-save-result" hx-swap="innerHTML">
+      Bắt đầu sinh video
+    </button>
+    {% endif %}
+  </form>
+  <div id="script-save-result" class="result-area" aria-live="polite"></div>
+  {% else %}
+  <p class="muted">Chưa có kịch bản. Chạy nghiên cứu chủ đề trước.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Xem trước &amp; duyệt rendition</h2>
+  <div class="cols">
+    {% for r in renditions %}
+    <div class="rendition">
+      <h3>{{ "Tiếng Việt" if r.locale == "vi" else "Tiếng Anh" }} ({{ r.locale }})</h3>
+      <div class="preview">
+        {% if r.master_asset_id %}
+        <video controls preload="metadata" src="/api/v1/assets/{{ r.master_asset_id }}/stream"></video>
+        {% else %}
+        <p class="muted">Chưa có video xem trước</p>
+        {% endif %}
+      </div>
+      <p><strong>{{ r.title or "(chưa có tiêu đề)" }}</strong></p>
+      <p class="muted small">{{ r.description }}</p>
+      <p class="small">{{ r.hashtags|join(" ") }}</p>
+      {% if r.is_approved %}
+      <span class="badge cap-DIRECT">Đã duyệt</span>
+      {% elif can_publish or can_edit %}
+      <button class="btn btn-primary"
+              hx-post="/api/v1/renditions/{{ r.id }}/approve"
+              hx-target="#rendition-result" hx-swap="innerHTML">
+        Duyệt bản {{ r.locale }}
+      </button>
+      {% endif %}
+    </div>
+    {% else %}
+    <p class="muted">Chưa có rendition nào.</p>
+    {% endfor %}
+  </div>
+  <div id="rendition-result" class="result-area" aria-live="polite"></div>
+</section>
+
+<section class="card">
+  <h2>Kế hoạch xuất bản</h2>
+  <form hx-post="/api/v1/publications" hx-ext="json-enc" hx-target="#publish-result" hx-swap="innerHTML">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="creative_id" value="{{ creative.id }}">
+    <fieldset>
+      <legend>Nền tảng</legend>
+      {% for p in platforms %}
+      <label class="check">
+        <input type="checkbox" name="platforms" value="{{ p }}" {% if not can_publish %}disabled{% endif %}>
+        {{ platform_labels.get(p, p) }}
+        <span class="badge cap-{{ capability_by_platform.get(p, 'MANUAL') }}">{{ capability_by_platform.get(p, "MANUAL") }}</span>
+      </label>
+      {% endfor %}
+    </fieldset>
+    <div class="cols">
+      <label>Quyền riêng tư
+        <select name="privacy" {% if not can_publish %}disabled{% endif %}>
+          <option value="private" selected>Riêng tư</option>
+          <option value="unlisted">Không công khai</option>
+          <option value="public">Công khai</option>
+        </select>
+      </label>
+      <label>Giờ đăng (Asia/Ho_Chi_Minh)
+        <input type="datetime-local" name="scheduled_at_local" value="{{ default_schedule }}" {% if not can_publish %}disabled{% endif %}>
+      </label>
+      <label>Chế độ
+        <select name="mode" {% if not can_publish %}disabled{% endif %}>
+          <option value="manual" {% if creative.mode == "manual" %}selected{% endif %}>Thủ công</option>
+          <option value="auto" {% if creative.mode == "auto" %}selected{% endif %}>Tự động</option>
+        </select>
+      </label>
+    </div>
+    {% if can_publish %}
+    <button type="submit" class="btn btn-primary">Lên lịch xuất bản</button>
+    {% else %}
+    <p class="muted">Cần vai trò publisher hoặc admin để lên lịch xuất bản.</p>
+    {% endif %}
+  </form>
+  <div id="publish-result" class="result-area" aria-live="polite"></div>
+
+  {% if targets %}
+  <h3>Mục tiêu đã tạo</h3>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Nền tảng</th><th>Trạng thái</th><th>Giờ đăng</th><th>Remote post ID</th></tr>
+      </thead>
+      <tbody>
+        {% for t in targets %}
+        <tr>
+          <td>{{ platform_labels.get(t.platform, t.platform) }}</td>
+          <td><span class="badge pub-{{ t.status }}">{{ t.status }}</span></td>
+          <td>{{ t.scheduled_at|hcm_time }}</td>
+          <td>{{ t.remote_post_id or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Brief mới{% endblock %}
+{% block content %}
+<h1>Tạo brief mới</h1>
+
+<section class="card">
+  <h2>Tìm chủ đề từ brief</h2>
+  <p class="muted">Hệ thống tìm chủ đề AI/công nghệ trong 72 giờ gần nhất, chỉ giữ chủ đề có ít nhất hai nguồn độc lập.</p>
+  <form hx-post="/api/v1/topics/discover" hx-ext="json-enc" hx-target="#topics-result" hx-swap="innerHTML">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Tên chiến dịch
+      <input type="text" name="campaign_name" required placeholder="Ví dụ: Tin AI tuần 34">
+    </label>
+    <label>Brief
+      <textarea name="brief" rows="4" required placeholder="Mô tả nội dung muốn làm video..."></textarea>
+    </label>
+    <label>Danh mục
+      <input type="text" name="category" placeholder="AI, công nghệ...">
+    </label>
+    <label>Chế độ
+      <select name="mode">
+        <option value="manual" selected>Thủ công (duyệt từng bước)</option>
+        <option value="auto">Tự động (vẫn qua các gate)</option>
+      </select>
+    </label>
+    <button type="submit" class="btn btn-primary">Tìm chủ đề</button>
+  </form>
+  <div id="topics-result" class="result-area" aria-live="polite"></div>
+</section>
+
+<section class="card">
+  <h2>Tạo creative trực tiếp</h2>
+  <form hx-post="/api/v1/creatives" hx-ext="json-enc" hx-target="#creative-result" hx-swap="innerHTML">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Chiến dịch có sẵn
+      <select name="campaign_id">
+        {% for camp in campaigns %}
+        <option value="{{ camp.id }}">{{ camp.name }}</option>
+        {% else %}
+        <option value="" disabled selected>Chưa có chiến dịch</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Chủ đề
+      <input type="text" name="topic_title" placeholder="Chủ đề đã chọn">
+    </label>
+    <button type="submit" class="btn">Tạo creative</button>
+  </form>
+  <div id="creative-result" class="result-area" aria-live="polite"></div>
+</section>
+{% endblock %}

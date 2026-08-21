@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Kết nối kênh{% endblock %}
+{% block content %}
+<h1>Kết nối kênh</h1>
+
+<section class="card">
+  <h2>Tài khoản đã kết nối</h2>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Nền tảng</th>
+          <th>Tên hiển thị</th>
+          <th>Khả năng</th>
+          <th>Trạng thái</th>
+          <th>Token hết hạn</th>
+          <th>Probe gần nhất</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in accounts %}
+        <tr>
+          <td>{{ platform_labels.get(a.platform, a.platform) }}</td>
+          <td>{{ a.display_name or "—" }}</td>
+          <td><span class="badge cap-{{ a.capability }}">{{ a.capability }}</span></td>
+          <td>{{ a.status }}</td>
+          <td>{{ a.token_expires_at|hcm_time }}</td>
+          <td>{{ a.last_probe_at|hcm_time }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">Chưa có tài khoản nào được kết nối</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Thêm kết nối mới</h2>
+  <p class="muted">Bắt đầu OAuth cho từng nền tảng. TikTok luôn yêu cầu thao tác thủ công trong MVP.</p>
+  <div class="linkrow">
+    {% for p in platforms %}
+    <a class="btn" href="/oauth/{{ p }}/start">Kết nối {{ platform_labels.get(p, p) }}</a>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

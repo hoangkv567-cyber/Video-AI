@@ -22,6 +22,16 @@ class ModelConfig(BaseModel):
     tts_voice_vi: str = "vi-VN-Neural2-A"
     tts_voice_en: str = "en-US-Neural2-F"
 
+    # Free-tier stack (see PLAN.md "Chế độ miễn phí"): Groq Orpheus has no
+    # Vietnamese, so VI voice comes from edge-tts; caption timing for both
+    # locales comes from Groq Whisper word timestamps.
+    groq_llm_model: str = "llama-3.3-70b-versatile"
+    groq_tts_model_en: str = "canopylabs/orpheus-v1-english"
+    groq_tts_voice_en: str = "hannah"
+    groq_whisper_model: str = "whisper-large-v3"
+    edge_tts_voice_vi: str = "vi-VN-HoaiMyNeural"
+    groq_tts_max_chars: int = 200  # per-request input limit; chunk and concat
+
     # Reference prices in USD; verify against the live pricing page at startup.
     veo_lite_usd_per_second: float = 0.05
     veo_fast_usd_per_second: float = 0.15
@@ -59,6 +69,14 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     google_tts_credentials_json: str = ""
+    groq_api_key: str = ""
+
+    # Provider selection. Free-tier defaults: no Veo (no free tier exists) —
+    # the visual master is built from keyframes with FFmpeg motion instead.
+    video_provider: str = "keyframe_motion"  # keyframe_motion | veo
+    tts_provider_en: str = "groq"  # groq | google | edge
+    tts_provider_vi: str = "edge"  # edge | google  (Groq has no Vietnamese)
+    caption_timing_provider: str = "groq_whisper"  # groq_whisper | tts_marks | estimate
 
     gemini_text_model: str = ""
     gemini_image_model: str = ""

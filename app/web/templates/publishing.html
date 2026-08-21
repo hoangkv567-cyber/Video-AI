@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Trạng thái xuất bản{% endblock %}
+{% block content %}
+<h1>Trạng thái xuất bản</h1>
+
+{% for platform, items in by_platform.items() %}
+<section class="card">
+  <h2>{{ platform_labels.get(platform, platform) }}</h2>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Chủ đề</th>
+          <th>Trạng thái</th>
+          <th>Quyền riêng tư</th>
+          <th>Giờ đăng</th>
+          <th>Remote post ID</th>
+          <th>Lỗi</th>
+          <th>Bundle</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in items %}
+        {% set t = item.target %}
+        <tr>
+          <td><a href="/creatives/{{ item.creative.id }}">{{ item.creative.topic_title or "(chưa có chủ đề)" }}</a></td>
+          <td><span class="badge pub-{{ t.status }}">{{ t.status }}</span></td>
+          <td>{{ t.privacy }}</td>
+          <td>{{ t.scheduled_at|hcm_time }}</td>
+          <td>{{ t.remote_post_id or "—" }}</td>
+          <td>
+            {% if t.last_error %}
+            <details><summary class="error">{{ t.last_error.get("code", "lỗi") }}</summary>
+              <pre class="small">{{ t.last_error.get("message", "") }}</pre>
+            </details>
+            {% else %}—{% endif %}
+          </td>
+          <td>
+            {% if t.bundle_path %}
+            <a class="btn btn-small" href="/api/v1/publish-targets/{{ t.id }}/bundle">Tải bundle</a>
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="muted">Chưa có mục nào</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endfor %}
+{% endblock %}
