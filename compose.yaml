@@ -1,0 +1,93 @@
+name: videoai
+
+x-app-base: &app-base
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+psycopg://videoai:${POSTGRES_PASSWORD:-videoai}@postgres:5432/videoai
+    REDIS_URL: redis://redis:6379/0
+    MINIO_ENDPOINT: minio:9000
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_started
+    minio:
+      condition: service_started
+  restart: unless-stopped
+
+services:
+  web:
+    <<: *app-base
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    expose:
+      - "8000"
+
+  worker-ai:
+    <<: *app-base
+    command: celery -A app.workers.celery_app worker -Q ai -c 2 -n ai@%h
+
+  worker-render:
+    <<: *app-base
+    command: celery -A app.workers.celery_app worker -Q render -c 1 -n render@%h
+
+  worker-publish:
+    <<: *app-base
+    command: celery -A app.workers.celery_app worker -Q publish -c 2 -n publish@%h
+
+  scheduler:
+    <<: *app-base
+    command: python -m app.workers.scheduler
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: videoai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-videoai}
+      POSTGRES_DB: videoai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U videoai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redisdata:/data
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-videoai}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-videoai-secret}
+    volumes:
+      - miniodata:/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  caddydata:
+  caddyconfig:
