@@ -65,7 +65,8 @@ class TestKeyHandling:
     def test_test_env_gets_ephemeral_key_when_unset(self) -> None:
         settings = SimpleNamespace(app_env="test", token_encryption_key="")
         fernet = get_fernet(settings=settings)
-        assert decrypt_credentials(encrypt_credentials(CREDS, settings=settings)) == CREDS
+        token = encrypt_credentials(CREDS, settings=settings)
+        assert decrypt_credentials(token, settings=settings) == CREDS
         assert fernet is not None
 
     def test_production_requires_a_configured_key(self) -> None:

@@ -25,7 +25,9 @@ class ModelConfig(BaseModel):
     # Free-tier stack (see PLAN.md "Chế độ miễn phí"): Groq Orpheus has no
     # Vietnamese, so VI voice comes from edge-tts; caption timing for both
     # locales comes from Groq Whisper word timestamps.
-    groq_llm_model: str = "llama-3.3-70b-versatile"
+    # llama-3.3 was retired from Groq's catalog; gpt-oss-120b is the strongest
+    # free-tier text model on this key (probed 2026-08-21).
+    groq_llm_model: str = "openai/gpt-oss-120b"
     groq_tts_model_en: str = "canopylabs/orpheus-v1-english"
     groq_tts_voice_en: str = "hannah"
     groq_whisper_model: str = "whisper-large-v3"
