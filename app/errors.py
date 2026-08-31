@@ -63,6 +63,17 @@ class UpstreamError(AppError):
     retryable = True
 
 
+class ProviderQuotaExhausted(AppError):
+    """The provider definitively rejected the call BEFORE any billable side
+    effect (e.g. Alibaba ``AllocationQuota.FreeTierOnly`` 403, Groq/Gemini
+    quota-exhausted 429 after retries). Callers may safely fall back to
+    another provider/model: no charge and no remote operation was created."""
+
+    status_code = 503
+    code = "provider_quota_exhausted"
+    retryable = False
+
+
 def error_envelope(exc: AppError, correlation_id: str | None = None) -> dict[str, Any]:
     return {
         "code": exc.code,

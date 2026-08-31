@@ -15,6 +15,7 @@ import pytest
 from conftest import make_video_plan
 from fastapi.testclient import TestClient
 
+from app.api import routes as routes_module
 from app.db import Base, SessionLocal, engine
 from app.main import app
 from app.models import (
@@ -33,28 +34,27 @@ pytestmark = pytest.mark.usefixtures("api_schema")
 
 
 @pytest.fixture(scope="module")
-def api_schema() -> Iterator[None]:
+def api_schema() -> Iterator[str]:
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        db.add(
-            User(
-                email="pub-idem@t.local",
-                name="Publisher",
-                role=Role.PUBLISHER.value,
-                password_hash="x",
-            )
+        user = User(
+            email="pub-idem@t.local",
+            name="Publisher",
+            role=Role.ADMIN.value,
+            password_hash="x",
         )
+        db.add(user)
         db.commit()
-        yield
+        yield user.id
     finally:
         db.close()
 
 
 @pytest.fixture()
-def client() -> Iterator[TestClient]:
-    with TestClient(app) as test_client:
+def client(api_schema: str) -> Iterator[TestClient]:
+    with TestClient(app, headers={"X-User-Id": api_schema}) as test_client:
         yield test_client
 
 
@@ -65,6 +65,11 @@ def db() -> Iterator:
         yield session
     finally:
         session.close()
+
+
+@pytest.fixture(autouse=True)
+def generation_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routes_module, "generation_preflight_issues", lambda: [])
 
 
 def _seed_approved_creative(db) -> str:
@@ -96,9 +101,7 @@ def _seed_publishable_creative(db) -> tuple[str, str]:
     creative_id = _seed_approved_creative(db)
     creative = db.get(Creative, creative_id)
     creative.state = CreativeState.FINAL_APPROVED.value
-    rendition = Rendition(
-        creative_id=creative_id, locale="vi", title="Title vi", is_approved=True
-    )
+    rendition = Rendition(creative_id=creative_id, locale="vi", title="Title vi", is_approved=True)
     db.add(rendition)
     db.commit()
     return creative_id, rendition.id
@@ -106,6 +109,47 @@ def _seed_publishable_creative(db) -> tuple[str, str]:
 
 def _job_count(db, kind: str) -> int:
     return db.query(Job).filter(Job.kind == kind).count()
+
+
+def test_discover_requires_key_and_replay_creates_one_job(client: TestClient, db) -> None:
+    missing = client.post("/api/v1/topics/discover", json={"brief": "AI news"})
+    assert missing.status_code == 422
+    assert missing.json()["code"] == "validation_failed"
+
+    key = f"discover-{uuid.uuid4()}"
+    headers = {"Idempotency-Key": key}
+    before = _job_count(db, "discover")
+    first = client.post("/api/v1/topics/discover", json={"brief": "AI news"}, headers=headers)
+    replay = client.post("/api/v1/topics/discover", json={"brief": "AI news"}, headers=headers)
+    assert first.status_code == replay.status_code == 202
+    assert replay.json() == first.json()
+    db.expire_all()
+    assert _job_count(db, "discover") == before + 1
+
+    conflict = client.post(
+        "/api/v1/topics/discover",
+        json={"brief": "Different AI news"},
+        headers=headers,
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "idempotency_key_conflict"
+
+
+def test_create_creative_replay_creates_one_campaign_and_creative(client: TestClient, db) -> None:
+    key = f"create-{uuid.uuid4()}"
+    headers = {"Idempotency-Key": key}
+    body = {"campaign_name": "One campaign", "topic_title": "One topic"}
+    campaigns_before = db.query(Campaign).count()
+    creatives_before = db.query(Creative).count()
+
+    first = client.post("/api/v1/creatives", json=body, headers=headers)
+    replay = client.post("/api/v1/creatives", json=body, headers=headers)
+
+    assert first.status_code == replay.status_code == 201
+    assert replay.json() == first.json()
+    db.expire_all()
+    assert db.query(Campaign).count() == campaigns_before + 1
+    assert db.query(Creative).count() == creatives_before + 1
 
 
 def test_generate_double_post_same_key_returns_identical_response_and_no_new_job(
@@ -132,9 +176,7 @@ def test_generate_double_post_same_key_returns_identical_response_and_no_new_job
 
     db.expire_all()
     assert _job_count(db, "generate") == jobs_before + 1  # NO new Job row
-    stored = (
-        db.query(IdempotencyKey).filter(IdempotencyKey.key == key).all()
-    )
+    stored = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).all()
     assert len(stored) == 1
 
 
@@ -158,9 +200,7 @@ def test_generate_same_key_different_body_conflicts(client: TestClient, db) -> N
     assert set(payload) >= {"code", "message", "retryable", "details", "correlation_id"}
 
 
-def test_generate_double_click_with_fresh_key_hits_state_machine(
-    client: TestClient, db
-) -> None:
+def test_generate_double_click_with_fresh_key_hits_state_machine(client: TestClient, db) -> None:
     creative_id = _seed_approved_creative(db)
     jobs_before = _job_count(db, "generate")
     first = client.post(
@@ -174,10 +214,37 @@ def test_generate_double_click_with_fresh_key_hits_state_machine(
         json={},
         headers={"Idempotency-Key": f"gen-{uuid.uuid4()}"},
     )
-    assert second.status_code == 409  # GENERATING has no GENERATING edge
-    assert second.json()["code"] == "invalid_transition"
+    assert second.status_code == 409  # active job in flight
+    assert second.json()["code"] == "generation_in_progress"
     db.expire_all()
     assert _job_count(db, "generate") == jobs_before + 1
+
+
+def test_generate_retry_after_failed_job_resumes_from_generating(
+    client: TestClient, db
+) -> None:
+    """A transient upstream failure leaves GENERATING; a retry must re-enqueue."""
+    creative_id = _seed_approved_creative(db)
+    first = client.post(
+        f"/api/v1/creatives/{creative_id}/generate",
+        json={},
+        headers={"Idempotency-Key": f"gen-{uuid.uuid4()}"},
+    )
+    assert first.status_code == 202
+    from app.models import Job
+    from app.states import JobStatus
+
+    job = db.query(Job).filter_by(creative_id=creative_id, kind="generate").one()
+    job.status = JobStatus.FAILED.value  # simulate the transient-failure outcome
+    db.commit()
+
+    second = client.post(
+        f"/api/v1/creatives/{creative_id}/generate",
+        json={},
+        headers={"Idempotency-Key": f"gen-{uuid.uuid4()}"},
+    )
+    assert second.status_code == 202
+    assert second.json()["kind"] == "generate"
 
 
 def test_same_key_is_scoped_per_endpoint(client: TestClient, db) -> None:
@@ -196,9 +263,7 @@ def test_same_key_is_scoped_per_endpoint(client: TestClient, db) -> None:
     assert first.json()["job_id"] != second.json()["job_id"]
 
 
-def test_publications_double_post_same_key_creates_no_new_targets(
-    client: TestClient, db
-) -> None:
+def test_publications_double_post_same_key_creates_no_new_targets(client: TestClient, db) -> None:
     creative_id, rendition_id = _seed_publishable_creative(db)
     key = f"pub-{uuid.uuid4()}"
     body = {
@@ -222,9 +287,7 @@ def test_publications_double_post_same_key_creates_no_new_targets(
     assert targets_after_second == targets_after_first == 1
     assert _job_count(db, "publish") >= 1
     publish_jobs = (
-        db.query(Job)
-        .filter(Job.kind == "publish", Job.creative_id == creative_id)
-        .count()
+        db.query(Job).filter(Job.kind == "publish", Job.creative_id == creative_id).count()
     )
     assert publish_jobs == 1
 

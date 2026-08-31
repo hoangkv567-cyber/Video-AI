@@ -25,13 +25,14 @@ from fastapi.responses import RedirectResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from sqlalchemy.orm import Session
 
+from app.api.deps import require_roles
 from app.config import Settings, get_settings
 from app.db import get_db
 from app.errors import NotFound, UpstreamError, ValidationFailed
-from app.models import ConnectedAccount
+from app.models import ConnectedAccount, User
 from app.publishing.crypto import encrypt_credentials
 from app.publishing.registry import create_publisher, probe_and_record
-from app.states import Capability, Platform
+from app.states import Capability, Platform, Role
 
 router = APIRouter(prefix="/oauth", tags=["oauth"])
 
@@ -110,7 +111,10 @@ def _redirect_uri(platform: str, settings: Settings) -> str:
 
 
 @router.get("/{platform}/start")
-def oauth_start(platform: str) -> RedirectResponse:
+def oauth_start(
+    platform: str,
+    user: Annotated[User, Depends(require_roles(Role.ADMIN))],
+) -> RedirectResponse:
     endpoints = _require_platform(platform)
     settings = get_settings()
     client_id, _ = _client_pair(platform, settings)
@@ -131,7 +135,12 @@ def oauth_start(platform: str) -> RedirectResponse:
     response = RedirectResponse(
         url=f"{endpoints.authorize_url}?{urlencode(params)}", status_code=302
     )
-    payload = {"platform": platform, "state": state, "verifier": verifier}
+    payload = {
+        "platform": platform,
+        "state": state,
+        "verifier": verifier,
+        "user_id": user.id,
+    }
     response.set_cookie(
         STATE_COOKIE,
         _serializer().dumps(payload),
@@ -143,7 +152,12 @@ def oauth_start(platform: str) -> RedirectResponse:
     return response
 
 
-def _read_state_cookie(request: Request, platform: str, state: str) -> dict[str, Any]:
+def _read_state_cookie(
+    request: Request,
+    platform: str,
+    state: str,
+    user_id: str,
+) -> dict[str, Any]:
     token = request.cookies.get(STATE_COOKIE)
     if not token:
         raise ValidationFailed("missing oauth state cookie", code="oauth_state_missing")
@@ -153,7 +167,12 @@ def _read_state_cookie(request: Request, platform: str, state: str) -> dict[str,
         raise ValidationFailed(
             "oauth state cookie is invalid or expired", code="oauth_state_invalid"
         ) from exc
-    if not isinstance(data, dict) or data.get("platform") != platform or data.get("state") != state:
+    if (
+        not isinstance(data, dict)
+        or data.get("platform") != platform
+        or data.get("state") != state
+        or data.get("user_id") != user_id
+    ):
         raise ValidationFailed("oauth state mismatch", code="oauth_state_mismatch")
     return data
 
@@ -198,6 +217,7 @@ def oauth_callback(
     request: Request,
     db: Annotated[Session, Depends(get_db)],
     client: Annotated[httpx.Client, Depends(get_http_client)],
+    user: Annotated[User, Depends(require_roles(Role.ADMIN))],
     code: str = "",
     state: str = "",
 ) -> RedirectResponse:
@@ -205,7 +225,7 @@ def oauth_callback(
     if not code or not state:
         raise ValidationFailed("code and state query parameters are required")
     settings = get_settings()
-    cookie = _read_state_cookie(request, platform, state)
+    cookie = _read_state_cookie(request, platform, state, user.id)
 
     token_data = _exchange_code(
         client,
@@ -218,6 +238,35 @@ def oauth_callback(
 
     scopes_raw = token_data.get("scope", "")
     scopes = [s for s in str(scopes_raw).replace(",", " ").split() if s]
+
+    if platform == "facebook" and "access_token" in token_data:
+        try:
+            perms_resp = client.get(
+                "https://graph.facebook.com/v21.0/me/permissions",
+                params={"access_token": token_data["access_token"]},
+            )
+            if perms_resp.status_code < 400:
+                granted = [
+                    p["permission"]
+                    for p in perms_resp.json().get("data", [])
+                    if p.get("status") == "granted"
+                ]
+                if granted:
+                    scopes = granted
+            pages_resp = client.get(
+                "https://graph.facebook.com/v21.0/me/accounts",
+                params={"access_token": token_data["access_token"]},
+            )
+            if pages_resp.status_code < 400:
+                pages = pages_resp.json().get("data", [])
+                if pages:
+                    page = pages[-1] if len(pages) > 1 else pages[0]
+                    token_data["page_id"] = page["id"]
+                    token_data["page_access_token"] = page["access_token"]
+                    token_data["page_name"] = page.get("name", "")
+        except Exception:
+            pass
+
     expires_at: datetime | None = None
     expires_in = token_data.get("expires_in")
     if isinstance(expires_in, int | float):
@@ -236,9 +285,11 @@ def oauth_callback(
     account.scopes = scopes
     account.token_expires_at = expires_at
     account.status = "active"
-    remote_id = token_data.get("open_id") or token_data.get("oa_id") or ""
+    remote_id = token_data.get("page_id") or token_data.get("open_id") or token_data.get("oa_id") or ""
     if remote_id:
         account.remote_account_id = str(remote_id)
+    if token_data.get("page_name"):
+        account.display_name = str(token_data["page_name"])
     db.flush()
 
     try:

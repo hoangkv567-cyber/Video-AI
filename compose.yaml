@@ -1,45 +1,70 @@
 name: videoai
 
 x-app-base: &app-base
+  image: videoai-app:latest
   build:
     context: .
     dockerfile: docker/Dockerfile
-  env_file: .env
+  env_file: ${VIDEOAI_ENV_FILE:-.env}
   environment:
     DATABASE_URL: postgresql+psycopg://videoai:${POSTGRES_PASSWORD:-videoai}@postgres:5432/videoai
     REDIS_URL: redis://redis:6379/0
     MINIO_ENDPOINT: minio:9000
-  depends_on:
-    postgres:
-      condition: service_healthy
-    redis:
-      condition: service_started
-    minio:
-      condition: service_started
+    MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-videoai}
+    MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-videoai-secret}
+    MINIO_BUCKET: ${MINIO_BUCKET:-videoai}
+    MINIO_SECURE: ${MINIO_SECURE:-false}
+    ASSET_STORE_BACKEND: minio
   restart: unless-stopped
+
+x-runtime-depends: &runtime-depends
+  migrate:
+    condition: service_completed_successfully
+  redis:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
 
 services:
   web:
     <<: *app-base
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    depends_on: *runtime-depends
     expose:
       - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    <<: *app-base
+    command: alembic upgrade head
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   worker-ai:
     <<: *app-base
     command: celery -A app.workers.celery_app worker -Q ai -c 2 -n ai@%h
+    depends_on: *runtime-depends
 
   worker-render:
     <<: *app-base
     command: celery -A app.workers.celery_app worker -Q render -c 1 -n render@%h
+    depends_on: *runtime-depends
 
   worker-publish:
     <<: *app-base
     command: celery -A app.workers.celery_app worker -Q publish -c 2 -n publish@%h
+    depends_on: *runtime-depends
 
   scheduler:
     <<: *app-base
     command: python -m app.workers.scheduler
+    depends_on: *runtime-depends
 
   postgres:
     image: postgres:16-alpine
@@ -60,29 +85,42 @@ services:
     image: redis:7-alpine
     volumes:
       - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-videoai}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-videoai-secret}
     volumes:
       - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   caddy:
     image: caddy:2-alpine
+    environment:
+      CADDY_ADDRESS: ${CADDY_ADDRESS:-:80}
     ports:
-      - "80:80"
-      - "443:443"
+      - "${CADDY_HTTP_PORT:-8080}:80"
+      - "${CADDY_HTTPS_PORT:-8443}:443"
     volumes:
       - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data
       - caddyconfig:/config
     depends_on:
-      - web
+      web:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

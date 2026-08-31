@@ -1,11 +1,12 @@
-"""Operator dashboard page routes (Jinja2 + HTMX, no SPA).
+"""Operator dashboard page routes (Jinja2 + small native-JS helpers, no SPA).
 
 Pages read the database directly for display; every mutation is submitted by
-HTMX to the REST API under ``/api/v1/...`` (those endpoints may not exist yet —
-pages must render regardless). All timestamps are stored UTC and converted to
-Asia/Ho_Chi_Minh only in the Jinja filters registered here.
+``fetch`` to the REST API under ``/api/v1/...``. All timestamps are stored UTC
+and converted to Asia/Ho_Chi_Minh only in the Jinja filters registered here.
 """
 
+import hashlib
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
@@ -18,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
+from app.maintenance.creative_deletion import creative_delete_blockers
 from app.models import (
     Campaign,
     ConnectedAccount,
@@ -38,6 +40,17 @@ router = APIRouter(prefix="", include_in_schema=False)
 
 _WEB_DIR = Path(__file__).resolve().parent
 _STATIC_DIR = _WEB_DIR / "static"
+
+
+def _static_asset_version() -> str:
+    """Fingerprint browser assets so deployments never reuse stale JavaScript."""
+    digest = hashlib.sha256()
+    for filename in ("app.js", "style.css"):
+        digest.update((_STATIC_DIR / filename).read_bytes())
+    return digest.hexdigest()[:12]
+
+
+_STATIC_ASSET_VERSION = _static_asset_version()
 
 templates = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
 templates.env.filters["hcm_time"] = format_hcm_time
@@ -78,6 +91,7 @@ def _page_context(request: Request, user: User | None, **extra: Any) -> dict[str
         "request": request,
         "current_user": user,
         "csrf_token": auth.make_csrf_token(csrf_bind),
+        "static_asset_version": _STATIC_ASSET_VERSION,
         "state_labels": STATE_LABELS,
         "platform_labels": PLATFORM_LABELS,
         **extra,
@@ -189,6 +203,12 @@ def overview(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
     state_counts: dict[str, int] = {}
     for c in creatives:
         state_counts[c.state] = state_counts.get(c.state, 0) + 1
+    can_delete_creatives = user.role == Role.ADMIN.value
+    delete_blockers = (
+        {creative.id: creative_delete_blockers(db, creative) for creative in creatives}
+        if can_delete_creatives
+        else {}
+    )
     context = _page_context(
         request,
         user,
@@ -196,6 +216,8 @@ def overview(request: Request, db: DbDep, user: UserDep) -> HTMLResponse:
         campaigns=campaigns,
         costs=costs,
         state_counts=state_counts,
+        can_delete_creatives=can_delete_creatives,
+        delete_blockers=delete_blockers,
     )
     return templates.TemplateResponse(request, "index.html", context)
 
@@ -235,7 +257,7 @@ def brief_new(request: Request, db: DbDep, user: EditorDep) -> HTMLResponse:
 
 
 def _scene_rows(
-    plan: dict[str, Any] | None, scenes: list[Scene]
+    plan: dict[str, Any] | None, scenes: Sequence[Scene]
 ) -> list[dict[str, Any]]:
     plan_scenes: dict[int, dict[str, Any]] = {}
     narr: dict[str, list[str]] = {"vi": [], "en": []}
@@ -306,6 +328,11 @@ def creative_detail(
     )
     accounts = db.execute(select(ConnectedAccount)).scalars().all()
     capability_by_platform = {a.platform: a.capability for a in accounts}
+    accounts_by_platform: dict[str, list[ConnectedAccount]] = {
+        platform.value: [] for platform in Platform
+    }
+    for account in accounts:
+        accounts_by_platform.setdefault(account.platform, []).append(account)
 
     plan = script_version.video_plan if script_version else None
     costs = _cost_totals(db, [creative_id])[creative_id]
@@ -324,6 +351,7 @@ def creative_detail(
         costs=costs,
         platforms=[p.value for p in Platform],
         capability_by_platform=capability_by_platform,
+        accounts_by_platform=accounts_by_platform,
         default_schedule=default_schedule,
         can_edit=user.role in {Role.ADMIN.value, Role.EDITOR.value},
         can_publish=user.role in {Role.ADMIN.value, Role.PUBLISHER.value},

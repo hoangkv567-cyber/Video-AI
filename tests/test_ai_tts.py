@@ -7,7 +7,7 @@ import httpx
 import pytest
 from sqlalchemy.orm import Session
 
-from app.ai.base import FakeTTSProvider, Timepoint
+from app.ai.base import FakeTTSProvider, Timepoint, TTSResult
 from app.ai.tts import (
     GoogleTTSProvider,
     TTSService,
@@ -83,6 +83,40 @@ class TestSynthesis:
         assert events[0].amount_usd == pytest.approx(len(text) * 16 / 1_000_000)
         assert ledger.total_actual(creative.id) > 0
 
+    def test_free_provider_uses_explicit_accounting_and_returned_voice(
+        self, db_session: Session, creative: Creative
+    ) -> None:
+        class FreeProvider(FakeTTSProvider):
+            def synthesize(self, *, ssml: str, voice: str, language_code: str) -> TTSResult:
+                result = super().synthesize(
+                    ssml=ssml, voice=voice, language_code=language_code
+                )
+                return TTSResult(
+                    audio_bytes=result.audio_bytes,
+                    timepoints=result.timepoints,
+                    duration_seconds=result.duration_seconds,
+                    voice="edge-returned-voice",
+                    audio_mime_type=result.audio_mime_type,
+                )
+
+        provider = FreeProvider()
+        ledger = CostLedger(db_session, default_cap_usd=6.0)
+        service = TTSService(
+            provider,
+            ledger,
+            model_id="edge-tts",
+            unit_price_usd=0.0,
+        )
+
+        result = service.synthesize_scene(creative, "Free narration.", "en")
+
+        assert result.voice == "edge-returned-voice"
+        assert result.cost_usd == 0.0
+        event = db_session.query(CostEvent).filter_by(creative_id=creative.id).one()
+        assert event.model_id == "edge-tts"
+        assert event.unit_price_usd == 0.0
+        assert event.amount_usd == 0.0
+
     def test_slightly_over_budget_gets_atempo_not_shorten(
         self, db_session: Session, creative: Creative
     ) -> None:
@@ -91,6 +125,7 @@ class TestSynthesis:
         result = service.synthesize_scene(creative, text, "en")
 
         assert not result.shorten_needed
+        assert result.atempo_factor is not None
         assert result.atempo_factor == pytest.approx(7.7143 / 7.6, abs=1e-3)
         assert 1.0 < result.atempo_factor <= 1.05
 

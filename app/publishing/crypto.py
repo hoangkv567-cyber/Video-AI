@@ -95,6 +95,37 @@ def decrypt_credentials(
     return data
 
 
+def encrypt_publish_checkpoint(
+    checkpoint: Mapping[str, Any],
+    *,
+    key: str | None = None,
+    settings: SettingsLike | None = None,
+) -> str:
+    """Encrypt durable publisher session state.
+
+    Upload URLs and provider-issued session identifiers are credentials in
+    practice.  Keeping this as a separate API makes it difficult for callers
+    to accidentally persist the plaintext dict in a JSON response or log.
+    """
+    # Reserved metadata comes last so a caller cannot downgrade or change the
+    # authenticated envelope type through mapping key collisions.
+    envelope = {**dict(checkpoint), "kind": "publish_checkpoint", "version": 1}
+    return encrypt_credentials(envelope, key=key, settings=settings)
+
+
+def decrypt_publish_checkpoint(
+    token: str,
+    *,
+    key: str | None = None,
+    settings: SettingsLike | None = None,
+) -> dict[str, Any]:
+    """Decrypt and validate a durable publisher checkpoint envelope."""
+    data = decrypt_credentials(token, key=key, settings=settings)
+    if data.get("kind") != "publish_checkpoint" or data.get("version") != 1:
+        raise ValueError("unsupported publish checkpoint envelope")
+    return data
+
+
 def redact(credentials: Mapping[str, Any]) -> dict[str, Any]:
     """Log-safe copy of a credential dict: sensitive values are masked."""
     out: dict[str, Any] = {}

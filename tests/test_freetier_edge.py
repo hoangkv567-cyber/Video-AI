@@ -165,3 +165,64 @@ def test_real_edge_tts_never_imported() -> None:
     provider.synthesize(ssml=build_ssml("Chào bạn."), voice="x", language_code="vi-VN")
     # The poisoned sys.modules entry is untouched: nothing imported edge_tts.
     assert sys.modules["edge_tts"] is None
+
+
+class NoAudioReceived(Exception):
+    """Mirrors edge_tts.exceptions.NoAudioReceived without importing the lib."""
+
+
+class FlakyThenOKCommunicate:
+    """Raises on the first N streams, then streams the good chunks."""
+
+    def __init__(self, chunks: list[dict[str, Any]], failures: int) -> None:
+        self._chunks = chunks
+        self._failures = failures
+
+    async def stream(self):
+        if self._failures > 0:
+            self._failures -= 1
+            raise NoAudioReceived("no audio received")
+        for chunk in self._chunks:
+            yield chunk
+
+
+def test_transient_stream_failure_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("app.ai.edge_tts_provider.time.sleep", sleeps.append)
+    calls: list[int] = []
+
+    def factory(text: str, voice: str) -> FlakyThenOKCommunicate:
+        # The factory builds a fresh Communicate per attempt, so the failure
+        # budget must live in the closure rather than on the instance.
+        attempt = len(calls) + 1
+        calls.append(1)
+        return FlakyThenOKCommunicate(make_chunks(), failures=1 if attempt == 1 else 0)
+
+    provider = EdgeTTSProvider(
+        voice="vi-VN-HoaiMyNeural", model_config=CFG, communicate_factory=factory
+    )
+    result = provider.synthesize(ssml=build_ssml(TEXT), voice="x", language_code="vi-VN")
+
+    assert result.audio_bytes == b"".join(AUDIO_PARTS)
+    assert len(calls) == 2  # one failure, one recovery
+    assert len(sleeps) == 1
+
+
+def test_persistent_stream_failure_raises_retryable_upstream_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.errors import UpstreamError
+
+    monkeypatch.setattr("app.ai.edge_tts_provider.time.sleep", lambda _s: None)
+
+    def factory(text: str, voice: str) -> FlakyThenOKCommunicate:
+        return FlakyThenOKCommunicate(make_chunks(), failures=99)
+
+    provider = EdgeTTSProvider(
+        voice="vi-VN-HoaiMyNeural", model_config=CFG, communicate_factory=factory
+    )
+    with pytest.raises(UpstreamError) as excinfo:
+        provider.synthesize(ssml=build_ssml(TEXT), voice="x", language_code="vi-VN")
+
+    assert excinfo.value.retryable is True
+    assert "NoAudioReceived" in str(excinfo.value)

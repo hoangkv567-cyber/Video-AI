@@ -7,6 +7,8 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
 
+_POSTGRES_CONNECT_TIMEOUT_SECONDS = 2
+
 
 class Base(DeclarativeBase):
     pass
@@ -17,6 +19,8 @@ def _make_engine():
     kwargs: dict = {"pool_pre_ping": True}
     if settings.database_url.startswith("sqlite"):
         kwargs = {"connect_args": {"check_same_thread": False}}
+    elif settings.database_url.startswith("postgresql"):
+        kwargs["connect_args"] = {"connect_timeout": _POSTGRES_CONNECT_TIMEOUT_SECONDS}
     return create_engine(settings.database_url, **kwargs)
 
 

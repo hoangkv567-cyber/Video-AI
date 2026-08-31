@@ -39,11 +39,12 @@
 <section class="card">
   <h2>Kịch bản &amp; lời thoại</h2>
   {% if script_version %}
+  <script id="video-plan-data" type="application/json">{{ plan|tojson }}</script>
   <p class="muted">
     Phiên bản {{ script_version.version }}
     {% if script_version.is_approved %}· <span class="badge cap-DIRECT">Đã duyệt</span>{% else %}· chưa duyệt{% endif %}
   </p>
-  <form hx-patch="/api/v1/scripts/{{ script_version.id }}" hx-ext="json-enc" hx-target="#script-save-result" hx-swap="innerHTML">
+  <form id="script-form" data-script-id="{{ script_version.id }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     {% for row in scene_rows %}
     <fieldset class="scene">
@@ -75,9 +76,9 @@
       </div>
       {% if row.scene and row.scene.status == "failed" and can_edit %}
       <button type="button" class="btn btn-warn"
-              hx-post="/api/v1/creatives/{{ creative.id }}/generate"
-              hx-vals='{"scene_index": {{ row.index }}}'
-              hx-target="#script-save-result" hx-swap="innerHTML">
+              data-action="generate"
+              data-creative-id="{{ creative.id }}"
+              data-scene-id="{{ row.scene.id }}">
         Thử lại cảnh {{ row.index + 1 }}
       </button>
       {% endif %}
@@ -88,10 +89,20 @@
     {% endfor %}
     {% if can_edit %}
     <button type="submit" class="btn btn-primary">Lưu kịch bản</button>
+    {% endif %}
+    {% if not script_version.is_approved and can_publish %}
     <button type="button" class="btn"
-            hx-post="/api/v1/creatives/{{ creative.id }}/generate"
-            hx-target="#script-save-result" hx-swap="innerHTML">
-      Bắt đầu sinh video
+            data-action="approve-script"
+            data-script-id="{{ script_version.id }}">
+      Duyệt kịch bản
+    </button>
+    {% endif %}
+    {% if script_version.is_approved and can_edit %}
+    <button type="button" class="btn btn-primary"
+            data-action="generate"
+            data-creative-id="{{ creative.id }}"
+            {% if creative.state == "GENERATING" %}disabled{% endif %}>
+      {{ "Đang sinh video…" if creative.state == "GENERATING" else "Bắt đầu sinh video" }}
     </button>
     {% endif %}
   </form>
@@ -119,10 +130,10 @@
       <p class="small">{{ r.hashtags|join(" ") }}</p>
       {% if r.is_approved %}
       <span class="badge cap-DIRECT">Đã duyệt</span>
-      {% elif can_publish or can_edit %}
+      {% elif can_publish %}
       <button class="btn btn-primary"
-              hx-post="/api/v1/renditions/{{ r.id }}/approve"
-              hx-target="#rendition-result" hx-swap="innerHTML">
+              data-action="approve-rendition"
+              data-rendition-id="{{ r.id }}">
         Duyệt bản {{ r.locale }}
       </button>
       {% endif %}
@@ -136,7 +147,7 @@
 
 <section class="card">
   <h2>Kế hoạch xuất bản</h2>
-  <form hx-post="/api/v1/publications" hx-ext="json-enc" hx-target="#publish-result" hx-swap="innerHTML">
+  <form id="publication-form" data-creative-id="{{ creative.id }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="creative_id" value="{{ creative.id }}">
     <fieldset>
@@ -147,6 +158,23 @@
         {{ platform_labels.get(p, p) }}
         <span class="badge cap-{{ capability_by_platform.get(p, 'MANUAL') }}">{{ capability_by_platform.get(p, "MANUAL") }}</span>
       </label>
+      <div class="cols platform-options">
+        <label>Rendition cho {{ platform_labels.get(p, p) }}
+          <select name="rendition_{{ p }}" {% if not can_publish %}disabled{% endif %}>
+            {% for r in renditions %}
+            <option value="{{ r.id }}">{{ r.locale }} · {{ r.title or "(chưa có tiêu đề)" }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Tài khoản kết nối
+          <select name="account_{{ p }}" {% if not can_publish %}disabled{% endif %}>
+            {% for account in accounts_by_platform.get(p, []) %}
+            <option value="{{ account.id }}" {% if loop.first %}selected{% endif %}>{{ account.display_name or account.remote_account_id or account.id }}</option>
+            {% endfor %}
+            <option value="" {% if not accounts_by_platform.get(p) %}selected{% endif %}>{% if accounts_by_platform.get(p) %}Không dùng tài khoản (xuất bản thủ công / Bundle){% else %}Không có · dùng fallback/manual nếu hỗ trợ{% endif %}</option>
+          </select>
+        </label>
+      </div>
       {% endfor %}
     </fieldset>
     <div class="cols">

@@ -35,6 +35,7 @@
   </div>
 </section>
 
+{% if current_user.role == "admin" %}
 <section class="card">
   <h2>Thêm kết nối mới</h2>
   <p class="muted">Bắt đầu OAuth cho từng nền tảng. TikTok luôn yêu cầu thao tác thủ công trong MVP.</p>
@@ -44,4 +45,5 @@
     {% endfor %}
   </div>
 </section>
+{% endif %}
 {% endblock %}

@@ -13,8 +13,10 @@ from cryptography.fernet import Fernet  # noqa: E402
 from app.publishing.crypto import (  # noqa: E402
     REDACTED,
     decrypt_credentials,
+    decrypt_publish_checkpoint,
     derive_fernet_key,
     encrypt_credentials,
+    encrypt_publish_checkpoint,
     get_fernet,
     redact,
 )
@@ -80,6 +82,24 @@ class TestNoPlaintextLeaks:
         token = encrypt_credentials(CREDS)
         for secret in CREDS.values():
             assert secret not in token
+
+    def test_publish_checkpoint_round_trip_is_opaque(self) -> None:
+        checkpoint = {
+            "target_id": "target-1",
+            "platform": "youtube",
+            "phase": "prepared",
+            "session": {
+                "upload_url": "https://upload.example/super-secret-session",
+                "video_id": "remote-1",
+            },
+        }
+        token = encrypt_publish_checkpoint(checkpoint)
+
+        assert "super-secret-session" not in token
+        decoded = decrypt_publish_checkpoint(token)
+        assert decoded["kind"] == "publish_checkpoint"
+        assert decoded["version"] == 1
+        assert decoded["session"] == checkpoint["session"]
 
     def test_repr_of_redacted_credentials_hides_secrets(self) -> None:
         redacted = redact(CREDS)

@@ -2,13 +2,14 @@
 
 Used whenever a target's capability is MANUAL/BLOCKED or platform review has
 not been granted. Writes a folder (optionally zipped) containing the
-derivative MP4 path reference, thumbnail, title, description, hashtags,
+actual derivative MP4, thumbnail, title, description, hashtags,
 disclosure and a step-by-step Vietnamese posting guide, and returns a manifest
-dict that the dashboard stores on the publish target.
+whose internal paths stay valid after the ZIP is moved or downloaded.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import zipfile
@@ -145,49 +146,71 @@ def build_bundle(
     zip_output: bool = False,
     deep_link: str | None = None,
 ) -> dict[str, Any]:
-    """Write the manual-posting bundle for one target and return its manifest."""
+    """Write a self-contained manual-posting bundle for one target.
+
+    A manual bundle is useful only when it can be moved to another machine, so
+    the video itself is mandatory and every path recorded in ``manifest.json``
+    is relative to the bundle root.  ``bundle_dir`` and ``zip_path`` are added
+    only to the returned build result; they are deliberately excluded from the
+    portable manifest stored in the archive.
+    """
     root = Path(out_dir)
     bundle_dir = root / f"{platform}_{ctx.rendition_id}_{ctx.locale}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     files: dict[str, str] = {}
 
-    video_ref = ctx.file_path or ctx.file_url or ""
+    if not ctx.file_path:
+        raise ValueError("manual bundle requires a local video file")
+    source_video = Path(ctx.file_path)
+    if not source_video.is_file():
+        raise FileNotFoundError(f"manual bundle video not found: {source_video}")
+    bundled_video = bundle_dir / f"video{source_video.suffix or '.mp4'}"
+    shutil.copyfile(source_video, bundled_video)
+    video_ref = bundled_video.name
+    files["video"] = bundled_video.name
+
     video_ref_file = bundle_dir / "video_path.txt"
     video_ref_file.write_text(video_ref + "\n", encoding="utf-8")
-    files["video_reference"] = str(video_ref_file)
+    files["video_reference"] = video_ref_file.name
 
     if ctx.thumbnail_path and Path(ctx.thumbnail_path).is_file():
         src = Path(ctx.thumbnail_path)
         dest = bundle_dir / f"thumbnail{src.suffix or '.jpg'}"
         shutil.copyfile(src, dest)
-        files["thumbnail"] = str(dest)
+        files["thumbnail"] = dest.name
     else:
         thumb_ref = bundle_dir / "thumbnail_path.txt"
         thumb_ref.write_text((ctx.thumbnail_path or "") + "\n", encoding="utf-8")
-        files["thumbnail"] = str(thumb_ref)
+        files["thumbnail"] = thumb_ref.name
 
     title_file = bundle_dir / "title.txt"
     title_file.write_text(ctx.title + "\n", encoding="utf-8")
-    files["title"] = str(title_file)
+    files["title"] = title_file.name
 
     description_file = bundle_dir / "description.txt"
     description_file.write_text(ctx.description + "\n", encoding="utf-8")
-    files["description"] = str(description_file)
+    files["description"] = description_file.name
 
     hashtags_file = bundle_dir / "hashtags.txt"
     hashtags_file.write_text("\n".join(ctx.hashtags) + "\n", encoding="utf-8")
-    files["hashtags"] = str(hashtags_file)
+    files["hashtags"] = hashtags_file.name
 
     disclosure_file = bundle_dir / "disclosure.txt"
     disclosure_file.write_text(_disclosure_text(ctx), encoding="utf-8")
-    files["disclosure"] = str(disclosure_file)
+    files["disclosure"] = disclosure_file.name
 
     instructions_file = bundle_dir / f"instructions_{platform}.md"
     instructions_file.write_text(_instructions_md(platform, ctx), encoding="utf-8")
-    files["instructions"] = str(instructions_file)
+    files["instructions"] = instructions_file.name
+
+    manifest_file = bundle_dir / "manifest.json"
+    files["manifest"] = manifest_file.name
+    with bundled_video.open("rb") as video_file:
+        video_sha256 = hashlib.file_digest(video_file, "sha256").hexdigest()
 
     manifest: dict[str, Any] = {
+        "bundle_format_version": 1,
         "platform": platform,
         "creative_id": ctx.creative_id,
         "rendition_id": ctx.rendition_id,
@@ -197,26 +220,28 @@ def build_bundle(
         "privacy": ctx.privacy,
         "scheduled_at": ctx.scheduled_at.astimezone(UTC).isoformat() if ctx.scheduled_at else None,
         "video_path": video_ref,
-        "bundle_dir": str(bundle_dir),
+        "video_sha256": video_sha256,
+        "video_size_bytes": bundled_video.stat().st_size,
         "files": files,
-        "zip_path": None,
         "deep_link": deep_link,
         "created_at": datetime.now(UTC).isoformat(),
     }
 
-    manifest_file = bundle_dir / "manifest.json"
     manifest_file.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    files["manifest"] = str(manifest_file)
 
+    zip_path: Path | None = None
     if zip_output:
         zip_path = root / f"{bundle_dir.name}.zip"
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(bundle_dir.rglob("*")):
                 if path.is_file():
                     archive.write(path, arcname=path.relative_to(bundle_dir))
-        manifest["zip_path"] = str(zip_path)
 
-    return manifest
+    return {
+        **manifest,
+        "bundle_dir": str(bundle_dir),
+        "zip_path": str(zip_path) if zip_path is not None else None,
+    }

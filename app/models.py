@@ -13,10 +13,12 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -229,6 +231,15 @@ class ConnectedAccount(Base, TimestampMixin):
 
 class Job(Base):
     __tablename__ = "jobs"
+    __table_args__ = (
+        Index(
+            "uq_jobs_active_veo_operation",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("kind = 'veo_operation' AND status = 'RUNNING'"),
+            sqlite_where=text("kind = 'veo_operation' AND status = 'RUNNING'"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     kind: Mapped[str] = mapped_column(String(64), index=True)  # discover|generate|render|publish|...
@@ -241,6 +252,9 @@ class Job(Base):
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    dispatched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

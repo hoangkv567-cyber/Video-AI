@@ -43,7 +43,7 @@ from xml.sax.saxutils import unescape
 import httpx
 
 from app.ai.base import SourceInfo, Timepoint, TTSResult
-from app.ai.gemini import build_plan_prompt, build_shorten_prompt, extract_json
+from app.ai.gemini import build_plan_prompt, build_repair_prompt, build_shorten_prompt, extract_json
 from app.ai.tts import END_MARK, split_sentences
 from app.config import ModelConfig, get_model_config, get_settings
 from app.costs import CostLedger
@@ -263,24 +263,41 @@ class _GroqAdapter:
         try:
             last_status: int | None = None
             for attempt in range(self._max_attempts):
-                response = client.post(
-                    url, json=json_body, data=data, files=files, headers=headers
-                )
+                response = client.post(url, json=json_body, data=data, files=files, headers=headers)
                 if response.status_code < 400:
                     return response
                 last_status = response.status_code
                 retryable = response.status_code in {408, 429} or response.status_code >= 500
+                provider_code: str | None = None
+                if response.status_code == 400:
+                    try:
+                        error = response.json().get("error")
+                    except (ValueError, AttributeError):
+                        error = None
+                    if isinstance(error, dict) and isinstance(error.get("code"), str):
+                        provider_code = error["code"]
+                    # Groq's json_validate_failed is a server-side output
+                    # validation flake with response_format=json_object: the
+                    # identical request succeeds on retry, so it belongs in the
+                    # retry loop rather than the fatal 4xx path.
+                    if provider_code == "json_validate_failed":
+                        retryable = True
                 if not retryable:
+                    details: dict[str, Any] = {
+                        "status_code": response.status_code,
+                        "endpoint": url,
+                    }
+                    if provider_code is not None:
+                        details["provider_code"] = provider_code
                     raise UpstreamError(
                         f"groq request failed with HTTP {response.status_code}",
                         retryable=False,
-                        details={"status_code": response.status_code, "endpoint": url},
+                        details=details,
                     )
                 if attempt + 1 < self._max_attempts:
                     self._sleep(self._backoff_base * (2**attempt))
             raise UpstreamError(
-                f"groq request failed with HTTP {last_status} "
-                f"after {self._max_attempts} attempts",
+                f"groq request failed with HTTP {last_status} after {self._max_attempts} attempts",
                 retryable=True,
                 details={"status_code": last_status, "endpoint": url},
             )
@@ -478,6 +495,9 @@ class GroqScriptProvider(_GroqAdapter):
     def shorten_narrations(self, plan: dict, issues: list[dict]) -> dict:
         return self._chat_json(build_shorten_prompt(plan, issues), note="script shorten")
 
+    def repair_plan(self, plan: dict, issues: list[dict]) -> dict:
+        return self._chat_json(build_repair_prompt(plan, issues), note="script repair")
+
     def _chat_json(self, prompt: str, *, note: str) -> dict:
         model_id = self._cfg.groq_llm_model
         response = self._post_with_retry(
@@ -486,6 +506,9 @@ class GroqScriptProvider(_GroqAdapter):
                 "model": model_id,
                 "messages": [{"role": "user", "content": prompt}],
                 "response_format": {"type": "json_object"},
+                "reasoning_format": "hidden",
+                "reasoning_effort": "low",
+                "max_completion_tokens": self._cfg.groq_llm_max_completion_tokens,
                 "temperature": self._TEMPERATURE,
             },
         )

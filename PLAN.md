@@ -23,7 +23,7 @@ Brief → Chủ đề có nguồn → VideoPlan JSON → Keyframe
 
 - Modular monolith bằng Python 3.12:
   - FastAPI cho REST API, OAuth callback và webhook.
-  - Jinja2 + HTMX cho dashboard, không xây SPA riêng.
+  - Jinja2 + JavaScript `fetch` tối thiểu cho dashboard, không xây SPA riêng.
   - Pydantic, SQLAlchemy và Alembic cho schema/database.
   - PostgreSQL là nguồn trạng thái duy nhất.
   - Celery + Redis với ba queue: `ai`, `render`, `publish`.
@@ -52,10 +52,15 @@ Brief → Chủ đề có nguồn → VideoPlan JSON → Keyframe
 
 Ưu tiên API free-tier; các adapter trả phí (Veo, Google Cloud TTS) vẫn giữ trong code và bật lại qua cấu hình:
 
-- Nghiên cứu và kịch bản: Gemini Flash free tier (giới hạn TPM/RPD); Groq `llama-3.3-70b-versatile` là provider thay thế khi hết quota.
-- Keyframe/thumbnail: Gemini image — kiểm tra hạn mức free tier lúc probe; nếu hết quota thì xếp hàng chờ ngày kế tiếp thay vì chuyển sang trả phí.
+- Nghiên cứu và kịch bản: Gemini Flash dùng quota hiện có; Google Search grounding
+  cần tier đủ điều kiện. Groq `openai/gpt-oss-120b` là fallback cho structured
+  script, còn research thiếu grounding chuyển sang nguồn nhập thủ công.
+- Keyframe/thumbnail: Gemini image — chỉ gọi khi capability probe xác nhận quota
+  hoặc billing; không tự chuyển sang tác vụ trả phí khi probe thất bại.
 - Video: **Veo không có free tier**, nên `VIDEO_PROVIDER=keyframe_motion` — dựng chuyển động từ keyframe bằng FFmpeg (Ken Burns zoompan/parallax), giữ nguyên cấu trúc 5 cảnh × 8 giây và crossfade 0,3 giây. Veo là tùy chọn trả phí bật lại sau.
-- TTS tiếng Anh: Groq Orpheus (`canopylabs/orpheus-v1-english`, free dev tier, giới hạn 200 ký tự/request nên phải chunk theo câu).
+- TTS tiếng Anh: Groq Orpheus (`canopylabs/orpheus-v1-english`, giới hạn 200
+  ký tự/request nên phải chunk theo câu); admin organization phải chấp nhận điều
+  khoản model. Edge TTS tiếng Anh là fallback vận hành.
 - TTS tiếng Việt: Groq **không hỗ trợ tiếng Việt**, dùng `edge-tts` (`vi-VN-HoaiMyNeural`, miễn phí, không cần key; endpoint không chính thức nên phải có provider interface để thay bằng Google Cloud TTS free tier 1 triệu ký tự/tháng khi cần độ ổn định).
 - Timestamp caption: không dựa vào SSML marks nữa — audio sinh xong được đưa qua Groq Whisper (`whisper-large-v3`, free tier) lấy word timestamps cho cả VI/EN.
 - Cost ledger vẫn ghi mọi lượt gọi với `amount_usd=0` kèm đếm quota (RPM/RPD) để biết khi nào chạm trần free tier; hard cap 6 USD chỉ áp dụng khi bật adapter trả phí.
@@ -158,7 +163,7 @@ Mỗi connection lưu capability thực tế: `DIRECT`, `SCHEDULE`, `DRAFT`, `MA
 
 | Tuần | Công việc | Exit gate |
 |---|---|---|
-| 1 — Nền tảng và quyền truy cập | Khởi tạo Git, `pyproject.toml`, dependency lock, lint/type-check/test/CI; Docker Compose; domain/TLS; spike Gemini Search, JSON, Nano Banana, một clip Veo và TTS VI/EN. Tạo Google/Meta/TikTok/Zalo app, OA và checklist OAuth; chuẩn bị privacy policy, terms, data-deletion page và hồ sơ audit. Cài Docker cho máy Windows; FFmpeg nằm trong container. | `/healthz` chạy trên VPS; CI xanh; một clip được tải và probe thành công; capability matrix và ước tính chi phí được xác nhận. |
+| 1 — Nền tảng và quyền truy cập | Khởi tạo Git, `pyproject.toml`, dependency lock, lint/type-check/test/CI; Docker Compose; domain/TLS; spike catalog/JSON/TTS và một clip keyframe-motion. Gemini Search/Image và Veo chỉ chạy khi probe quota/billing cho phép. Tạo Google/Meta/TikTok/Zalo app, OA và checklist OAuth; chuẩn bị privacy policy, terms, data-deletion page và hồ sơ audit. Cài Docker cho máy Windows; FFmpeg nằm trong container. | `/healthz` và `/readyz` chạy; CI xanh; clip local được probe thành công; capability matrix và ước tính chi phí được xác nhận. |
 | 2 — Research và scripting | Xây schema/database, state machine, dashboard skeleton, topic discovery, citation store, `VideoPlan v1`, versioning và script approval. Thêm semantic validator và policy gate. | Một brief tạo được 3–5 topic và một plan 5 scene với narration VI/EN; JSON sai, thiếu nguồn hoặc double-click đều bị xử lý đúng. |
 | 3 — Media generation | Xây MinIO asset store, Celery queues, Nano Banana adapter, Veo LRO polling, tải file, checksum, TTS/SSML, cost ledger và hard cap. | Có 5 clip dọc và hai voice track; restart worker không gọi Veo lại; chi phí projected/actual truy vết được. |
 | 4 — FFmpeg và QC | Normalize clip, strip/mix audio, crossfade, caption, thumbnail, platform derivatives, ffprobe/QC và preview UI. | Sinh được hai MP4 khoảng 38,8 giây dùng cùng visual checksums; codec, loudness, caption và safe zone đạt test. |

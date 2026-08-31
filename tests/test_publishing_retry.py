@@ -64,6 +64,12 @@ class TestClassification:
         assert excinfo.value.remote_status_code == 429
         assert excinfo.value.retry_after == 7.0
 
+    def test_408_maps_to_timeout_that_requires_a_probe(self) -> None:
+        with pytest.raises(PublishTimeout) as excinfo:
+            raise_for_publish_status(_response(408), context="mutating.request")
+        assert excinfo.value.retryable is True
+        assert excinfo.value.remote_status_code == 408
+
     def test_401_maps_to_token_expired(self) -> None:
         with pytest.raises(PublishTokenExpired):
             raise_for_publish_status(_response(401))
@@ -157,6 +163,26 @@ class TestRetryLoop:
 
 
 class TestTimeoutRecovery:
+    def test_ambiguous_probe_failure_prevents_blind_retry(self) -> None:
+        op_calls = {"n": 0}
+
+        def op() -> str:
+            op_calls["n"] += 1
+            raise PublishTimeout("remote outcome unknown")
+
+        def fail_closed_probe() -> str | None:
+            raise PublishNeedsAction("operator must reconcile the remote object")
+
+        with pytest.raises(PublishNeedsAction):
+            run_with_recovery(
+                op,
+                fail_closed_probe,
+                policy=POLICY,
+                sleep=SleepRecorder(),
+                rng=random.Random(0),
+            )
+        assert op_calls["n"] == 1
+
     def test_timeout_triggers_exactly_one_probe_and_no_duplicate_upload(self) -> None:
         """Probe says the upload exists -> its result is used, op is NOT re-run."""
         sleeps = SleepRecorder()

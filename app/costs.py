@@ -21,7 +21,7 @@ from app.models import AuditEvent, CostEvent, Creative
 
 
 def veo_price_per_second(model_id: str, cfg: ModelConfig | None = None) -> float:
-    """USD per generated second for a Veo model (lite 0.05 / fast 0.15 by default)."""
+    """USD per generated second for a Veo model (lite 0.05 / fast 0.10 at 720p)."""
     cfg = cfg or get_model_config()
     prices = {
         cfg.veo_model_lite: cfg.veo_lite_usd_per_second,
@@ -31,6 +31,18 @@ def veo_price_per_second(model_id: str, cfg: ModelConfig | None = None) -> float
         return prices[model_id]
     except KeyError:
         raise ValueError(f"unknown veo model: {model_id}") from None
+
+
+def wan_price_per_second(model_id: str, cfg: ModelConfig | None = None) -> float:
+    """USD per generated second for a Wan i2v model (720P list price)."""
+    cfg = cfg or get_model_config()
+    prices = {
+        cfg.wan_i2v_model: cfg.wan_usd_per_second_720p,
+    }
+    try:
+        return prices[model_id]
+    except KeyError:
+        raise ValueError(f"unknown wan model: {model_id}") from None
 
 
 def image_price_usd(cfg: ModelConfig | None = None) -> float:
@@ -163,9 +175,18 @@ class CostLedger:
         )
 
     def remove_projected(
-        self, creative_id: str, *, kind: str | None = None, note: str | None = None
+        self,
+        creative_id: str,
+        *,
+        kind: str | None = None,
+        note: str | None = None,
+        note_prefix: str | None = None,
     ) -> int:
-        """Delete projected rows once the matching actuals are recorded."""
+        """Delete projected rows once the matching actuals are recorded.
+
+        ``note_prefix`` targets the coarse script-level projection rows
+        (``"projected: ..."``) separately from per-scene notes.
+        """
         query = self._db.query(CostEvent).filter(
             CostEvent.creative_id == creative_id, CostEvent.projected.is_(True)
         )
@@ -173,11 +194,33 @@ class CostLedger:
             query = query.filter(CostEvent.kind == kind)
         if note is not None:
             query = query.filter(CostEvent.note == note)
+        if note_prefix is not None:
+            query = query.filter(CostEvent.note.like(f"{note_prefix}%"))
         rows = query.all()
         for row in rows:
             self._db.delete(row)
         self._db.flush()
         return len(rows)
+
+    def remove_projected_event(
+        self,
+        event_id: str,
+        *,
+        creative_id: str,
+        kind: str,
+    ) -> int:
+        """Delete one specifically linked projection, with ownership checks."""
+        row = self._db.get(CostEvent, event_id)
+        if (
+            row is None
+            or row.creative_id != creative_id
+            or row.kind != kind
+            or not row.projected
+        ):
+            return 0
+        self._db.delete(row)
+        self._db.flush()
+        return 1
 
     # -- totals -------------------------------------------------------------
 

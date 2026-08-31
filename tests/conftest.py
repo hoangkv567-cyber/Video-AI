@@ -8,6 +8,10 @@ from collections.abc import Callable, Generator
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test.sqlite3")
+os.environ["FACEBOOK_APP_SECRET"] = ""
+os.environ["YOUTUBE_CLIENT_SECRET"] = ""
+os.environ["TIKTOK_CLIENT_SECRET"] = ""
+os.environ["ZALO_APP_SECRET"] = ""
 
 import pytest
 from sqlalchemy import create_engine

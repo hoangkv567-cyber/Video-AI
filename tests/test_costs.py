@@ -29,7 +29,7 @@ class TestPriceLookups:
 
     def test_veo_fast_price_from_model_config(self) -> None:
         cfg = get_model_config()
-        assert veo_price_per_second(cfg.veo_model_fast, cfg) == pytest.approx(0.15)
+        assert veo_price_per_second(cfg.veo_model_fast, cfg) == pytest.approx(0.10)
 
     def test_unknown_veo_model_raises(self) -> None:
         with pytest.raises(ValueError, match="unknown veo model"):
@@ -37,7 +37,7 @@ class TestPriceLookups:
 
     def test_other_prices(self) -> None:
         cfg = get_model_config()
-        assert image_price_usd(cfg) == pytest.approx(0.039)
+        assert image_price_usd(cfg) == pytest.approx(0.067)
         assert text_call_price_usd(cfg) == pytest.approx(0.01)
         assert tts_price_per_char_usd(cfg) == pytest.approx(16.0 / 1_000_000)
 
@@ -153,12 +153,12 @@ class TestKeyframeCosts:
         assert len(events) == 1
         assert events[0].kind == "gemini_image"
         assert not events[0].projected
-        assert events[0].amount_usd == pytest.approx(0.039)
+        assert events[0].amount_usd == pytest.approx(0.067)
 
     def test_generate_all_cap_blocks_when_exhausted(
         self, db_session: Session, creative: Creative, video_plan_dict: dict
     ) -> None:
-        creative.cost_cap_usd = 0.10  # room for two images only
+        creative.cost_cap_usd = 0.14  # room for two 1K images only
         ledger = make_ledger(db_session)
         service = KeyframeService(FakeImageProvider(), ledger)
         plan = VideoPlan.model_validate(video_plan_dict)
@@ -166,4 +166,4 @@ class TestKeyframeCosts:
         with pytest.raises(CostCapExceeded):
             service.generate_all(creative, plan)
         # Two images landed before the third check tripped the cap.
-        assert ledger.total_actual(creative.id) == pytest.approx(0.078)
+        assert ledger.total_actual(creative.id) == pytest.approx(0.134)

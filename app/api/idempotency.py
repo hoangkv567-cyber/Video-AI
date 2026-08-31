@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -17,6 +18,14 @@ from sqlalchemy.orm import Session
 
 from app.errors import Conflict, ValidationFailed
 from app.models import IdempotencyKey
+
+
+@dataclass(frozen=True)
+class IdempotencyReservation:
+    """A key claimed before domain writes, or a committed replay response."""
+
+    row: IdempotencyKey
+    replay: bool
 
 
 def require_idempotency_key(key: str | None) -> str:
@@ -34,9 +43,7 @@ def request_hash(body: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def find_stored(
-    db: Session, *, key: str, endpoint: str, body_hash: str
-) -> IdempotencyKey | None:
+def find_stored(db: Session, *, key: str, endpoint: str, body_hash: str) -> IdempotencyKey | None:
     """Return the stored response row, or None. Body mismatch -> 409 Conflict."""
     row = (
         db.query(IdempotencyKey)
@@ -52,6 +59,51 @@ def find_stored(
             details={"key": key, "endpoint": endpoint},
         )
     return row
+
+
+def reserve_request(
+    db: Session, *, key: str, endpoint: str, body_hash: str
+) -> IdempotencyReservation:
+    """Reserve ``key`` before creating any Job/Creative side effects.
+
+    The reservation and domain writes remain in the same transaction. On
+    PostgreSQL a concurrent insert waits for the winner; if it loses the unique
+    race, rolling back is safe because this helper was the first write.
+    """
+    existing = find_stored(db, key=key, endpoint=endpoint, body_hash=body_hash)
+    if existing is not None:
+        return IdempotencyReservation(existing, replay=True)
+
+    row = IdempotencyKey(
+        key=key,
+        endpoint=endpoint,
+        request_hash=body_hash,
+        response_status=0,
+        response_body={},
+    )
+    db.add(row)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        winner = find_stored(db, key=key, endpoint=endpoint, body_hash=body_hash)
+        if winner is None:  # pragma: no cover - unique winner must be visible
+            raise
+        return IdempotencyReservation(winner, replay=True)
+    return IdempotencyReservation(row, replay=False)
+
+
+def finalize_reservation(
+    reservation: IdempotencyReservation,
+    *,
+    status_code: int,
+    response_body: dict[str, Any],
+) -> IdempotencyKey:
+    if reservation.replay:
+        return reservation.row
+    reservation.row.response_status = status_code
+    reservation.row.response_body = response_body
+    return reservation.row
 
 
 def store_response(

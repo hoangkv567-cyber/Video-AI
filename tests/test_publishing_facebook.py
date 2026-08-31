@@ -166,6 +166,34 @@ class TestSchedulingWindow:
 
 
 class TestResilience:
+    def test_finish_408_fails_closed_without_duplicate_post(self, tmp_path: Path) -> None:
+        recorded: dict = {"finish_calls": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url.startswith(f"{GRAPH_BASE}/{PAGE_ID}/video_reels"):
+                form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+                if form.get("upload_phase") == "start":
+                    return httpx.Response(
+                        200, json={"video_id": "v900", "upload_url": UPLOAD_URL}
+                    )
+                if form.get("upload_phase") == "finish":
+                    recorded["finish_calls"] += 1
+                    return httpx.Response(408, json={"error": "unknown outcome"})
+            if url.startswith(UPLOAD_URL):
+                return httpx.Response(200, json={"success": True})
+            return httpx.Response(404)
+
+        pub = make_publisher(handler)
+        ctx = make_ctx(tmp_path)
+        session = pub.upload(ctx, pub.prepare(ctx))
+
+        with pytest.raises(PublishNeedsAction) as excinfo:
+            pub.finalize(ctx, session)
+
+        assert excinfo.value.details["reason"] == "remote_outcome_unknown"
+        assert recorded["finish_calls"] == 1
+
     def test_500_on_start_retries_then_succeeds(self, tmp_path: Path) -> None:
         recorded: dict = {"start_calls": 0}
         sleeps = SleepRecorder()

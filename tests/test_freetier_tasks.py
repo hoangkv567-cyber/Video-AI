@@ -21,8 +21,24 @@ from app.config import Settings
 from app.media.runner import CommandResult
 from app.models import Asset, CostEvent, Creative, Job, Rendition, Scene, ScriptVersion
 from app.states import CreativeState, JobStatus
-from app.storage import LocalDirBackend
+from app.storage import LocalDirBackend, store_asset
 from app.workers.tasks import GenerationDeps, run_generate_creative, run_render_rendition
+
+GOOD_FFPROBE_JSON = """{
+  "streams": [
+    {"codec_type": "video", "codec_name": "h264", "width": 1080,
+     "height": 1920, "pix_fmt": "yuv420p", "avg_frame_rate": "30/1"},
+    {"codec_type": "audio", "codec_name": "aac", "sample_rate": "48000"}
+  ],
+  "format": {"duration": "38.8", "bit_rate": "4523000"}
+}"""
+
+GOOD_LOUDNORM_STDERR = """{
+  "input_i": "-14.0", "input_tp": "-1.5", "input_lra": "2.0",
+  "input_thresh": "-24.0", "output_i": "-14.0", "output_tp": "-1.5",
+  "output_lra": "2.0", "output_thresh": "-24.0",
+  "normalization_type": "linear", "target_offset": "0.0"
+}"""
 
 
 class FakeRunner:
@@ -34,8 +50,16 @@ class FakeRunner:
     def run(self, argv: Any) -> CommandResult:
         argv = list(argv)
         self.commands.append(argv)
+        if argv[0] == "ffprobe":
+            return CommandResult(tuple(argv), 0, GOOD_FFPROBE_JSON, "")
+        if argv[0] == "ffmpeg" and "-af" in argv and argv[-1] == "-":
+            audio_filter = argv[argv.index("-af") + 1]
+            if "loudnorm=" in audio_filter:
+                return CommandResult(tuple(argv), 0, "", GOOD_LOUDNORM_STDERR)
         output = argv[-1]
-        if argv[0] == "ffmpeg" and output.endswith(".mp4"):
+        if argv[0] == "ffmpeg" and (
+            output.endswith(".mp4") or output.endswith(".jpg") or output.endswith(".png")
+        ):
             path = Path(output)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"FAKEOUT:" + path.name.encode())
@@ -142,12 +166,10 @@ def test_render_cuts_motion_clips_from_keyframes_and_reuses_them(
     zoompan_cmds = [c for c in joined if "zoompan" in c]
     assert len(zoompan_cmds) == 5  # one Ken Burns render per scene
     assert all("d=240" in c and "s=1080x1920" in c for c in zoompan_cmds)
-    # Motion clips enter the standard chain: 5 kenburns + 5 normalize + concat + mix.
-    assert result["commands_run"] == 12
+    # Motion clips enter the standard chain: 5 kenburns + 5 normalize + concat + mix + loudnorm + captions + thumbnail.
+    assert result["commands_run"] == 15
     # The 38.8 s crossfade structure is unchanged.
-    assert any(
-        "xfade=transition=fade:duration=0.3:offset=7.7" in c for c in joined
-    )
+    assert any("xfade=transition=fade:duration=0.3:offset=7.7" in c for c in joined)
     assert any("offset=30.8" in c for c in joined)
 
     # Motion clips are persisted as per-scene assets (resume safety anchor).
@@ -174,9 +196,79 @@ def test_render_cuts_motion_clips_from_keyframes_and_reuses_them(
     )
     assert "error" not in result_en
     assert not any("zoompan" in " ".join(cmd) for cmd in runner_en.commands)
-    assert result_en["commands_run"] == 7  # 5 normalize + concat + mix only
+    assert result_en["commands_run"] == 10  # 5 normalize + concat + mix + loudnorm + captions + thumbnail
     assert _asset_count(db_session, creative.id, "motion_clip") == 5  # no duplicates
     assert creative.state == CreativeState.READY.value
+
+
+def test_motion_clip_cache_tracks_the_current_keyframe_checksum(
+    db_session: Session, creative: Creative, tmp_path: Path
+) -> None:
+    job = _seed_script_and_job(db_session, creative)
+    deps = _freetier_deps(tmp_path, FakeVideoProvider())
+    run_generate_creative(db_session, job.id, deps)
+    renditions = {
+        row.locale: row
+        for row in db_session.query(Rendition).filter_by(creative_id=creative.id)
+    }
+    run_render_rendition(
+        db_session,
+        renditions["vi"].id,
+        runner=FakeRunner(),
+        asset_store=deps.asset_store,
+        workdir=tmp_path / "render_original",
+    )
+    scene = (
+        db_session.query(Scene)
+        .filter_by(creative_id=creative.id)
+        .order_by(Scene.index)
+        .first()
+    )
+    previous_motion = (
+        db_session.query(Asset)
+        .filter_by(scene_id=scene.id, kind="motion_clip")
+        .one()
+    )
+    previous_hash = previous_motion.prompt_hash
+    current_keyframe = (
+        db_session.query(Asset)
+        .filter_by(scene_id=scene.id, kind="keyframe")
+        .order_by(Asset.created_at.desc())
+        .first()
+    )
+    store_asset(
+        db_session,
+        deps.asset_store,
+        creative_id=creative.id,
+        kind="keyframe",
+        scene_id=scene.id,
+        data=b"replacement-keyframe-bytes",
+        filename="replacement_keyframe.png",
+        model_id=current_keyframe.model_id,
+        prompt_hash=current_keyframe.prompt_hash,
+    )
+    db_session.commit()
+
+    runner = FakeRunner()
+    result = run_render_rendition(
+        db_session,
+        renditions["en"].id,
+        runner=runner,
+        asset_store=deps.asset_store,
+        workdir=tmp_path / "render_after_keyframe_change",
+    )
+
+    assert "error" not in result
+    assert len([cmd for cmd in runner.commands if "zoompan" in " ".join(cmd)]) == 1
+    assert _asset_count(db_session, creative.id, "motion_clip") == 6
+    latest_motion = (
+        db_session.query(Asset)
+        .filter_by(scene_id=scene.id, kind="motion_clip")
+        .order_by(Asset.created_at.desc())
+        .first()
+    )
+    assert latest_motion.prompt_hash
+    assert latest_motion.prompt_hash != previous_hash
 
 
 def test_generate_restart_keyframe_motion_reuses_everything(

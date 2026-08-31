@@ -62,3 +62,7 @@ check_untyped_defs = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "runtime: invokes locally installed runtime binaries such as FFmpeg",
+    "postgres: requires TEST_POSTGRES_URL and a live PostgreSQL server",
+]

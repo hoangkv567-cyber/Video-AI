@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from app.models import Creative, PublishTarget, Rendition
+from app.models import Creative, PublishAttempt, PublishTarget, Rendition
 from app.states import PublishTargetStatus
 from app.workers import scheduler
 from app.workers.scheduler import STALE_CLAIM_SECONDS, claim_due_targets, sweep_once
@@ -96,14 +96,88 @@ def test_future_and_unscheduled_targets_are_not_claimed(
 def test_non_pending_statuses_are_not_claimed(db_session: Session, creative: Creative) -> None:
     for status in (
         PublishTargetStatus.PUBLISHED.value,
-        PublishTargetStatus.FAILED.value,
         PublishTargetStatus.NEEDS_ACTION.value,
         PublishTargetStatus.UPLOADING.value,
     ):
         _seed_target(
             db_session, creative, scheduled_at=_now() - timedelta(minutes=10), status=status
         )
+    failed = _seed_target(
+        db_session,
+        creative,
+        scheduled_at=_now() - timedelta(minutes=10),
+        status=PublishTargetStatus.FAILED.value,
+    )
+    failed.last_error = {"retryable": False}
+    db_session.commit()
     assert claim_due_targets(db_session) == []
+
+
+def test_retryable_failed_immediate_target_is_reclaimed_after_backoff(
+    db_session: Session, creative: Creative
+) -> None:
+    now = _now()
+    target = _seed_target(
+        db_session,
+        creative,
+        scheduled_at=None,
+        status=PublishTargetStatus.FAILED.value,
+        claimed_at=now - timedelta(minutes=3),
+    )
+    target.last_error = {"code": "publish_retryable", "retryable": True}
+    db_session.add(
+        PublishAttempt(
+            target_id=target.id,
+            attempt_no=1,
+            status="failed",
+            finished_at=now - timedelta(minutes=2),
+        )
+    )
+    db_session.commit()
+
+    assert claim_due_targets(db_session, now=now) == [target.id]
+
+
+def test_retryable_target_waits_and_stops_at_attempt_cap(
+    db_session: Session, creative: Creative
+) -> None:
+    now = _now()
+    recent = _seed_target(
+        db_session,
+        creative,
+        scheduled_at=None,
+        status=PublishTargetStatus.FAILED.value,
+    )
+    recent.last_error = {"retryable": True}
+    db_session.add(
+        PublishAttempt(
+            target_id=recent.id,
+            attempt_no=1,
+            status="failed",
+            finished_at=now,
+        )
+    )
+
+    capped = _seed_target(
+        db_session,
+        creative,
+        scheduled_at=now - timedelta(hours=1),
+        status=PublishTargetStatus.FAILED.value,
+        claimed_at=now - timedelta(hours=1),
+    )
+    capped.last_error = {"retryable": True}
+    for attempt_no in range(1, scheduler.MAX_TARGET_ATTEMPTS + 1):
+        db_session.add(
+            PublishAttempt(
+                target_id=capped.id,
+                attempt_no=attempt_no,
+                status="failed",
+                finished_at=now - timedelta(minutes=5),
+            )
+        )
+    db_session.commit()
+
+    assert claim_due_targets(db_session, now=now) == []
 
 
 def test_sweep_enqueues_each_claim_once(db_session: Session, creative: Creative) -> None:
@@ -144,6 +218,36 @@ def test_stale_claim_is_resweepable_after_restart(
     if claimed_at.tzinfo is None:
         claimed_at = claimed_at.replace(tzinfo=UTC)
     assert claimed_at > stale  # claim timestamp refreshed (UTC)
+
+
+def test_stale_uploading_checkpoint_is_reclaimed_for_safe_reconciliation(
+    db_session: Session, creative: Creative
+) -> None:
+    stale = _now() - timedelta(seconds=STALE_CLAIM_SECONDS * 2)
+    target = _seed_target(
+        db_session,
+        creative,
+        scheduled_at=None,
+        status=PublishTargetStatus.UPLOADING.value,
+        claimed_at=stale,
+    )
+    db_session.add(
+        PublishAttempt(
+            target_id=target.id,
+            attempt_no=1,
+            status="uploading",
+            response={"encrypted_checkpoint": "opaque-ciphertext"},
+            started_at=stale,
+        )
+    )
+    db_session.commit()
+    enqueued: list[str] = []
+
+    claimed = sweep_once(db_session, enqueue=enqueued.append, now=_now())
+
+    assert claimed == [target.id]
+    assert enqueued == [target.id]
+    assert db_session.query(PublishAttempt).filter_by(target_id=target.id).count() == 1
 
 
 def test_fresh_claim_is_not_resweepable(db_session: Session, creative: Creative) -> None:

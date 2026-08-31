@@ -4,10 +4,10 @@ Single source of truth for lifecycle transitions; every state change must go
 through `advance()` so invalid jumps raise instead of silently corrupting rows.
 """
 
-import enum
+from enum import StrEnum
 
 
-class CreativeState(str, enum.Enum):
+class CreativeState(StrEnum):
     DRAFT = "DRAFT"
     RESEARCHED = "RESEARCHED"
     SCRIPT_READY = "SCRIPT_READY"
@@ -32,7 +32,9 @@ TRANSITIONS: dict[CreativeState, frozenset[CreativeState]] = {
         {CreativeState.SCRIPT_APPROVED, CreativeState.SCRIPT_READY}
     ),
     CreativeState.SCRIPT_APPROVED: frozenset({CreativeState.GENERATING}),
-    CreativeState.GENERATING: frozenset({CreativeState.QC_REQUIRED, CreativeState.FAILED}),
+    CreativeState.GENERATING: frozenset(
+        {CreativeState.QC_REQUIRED, CreativeState.NEEDS_ACTION, CreativeState.FAILED}
+    ),
     # Scene-level retry re-enters GENERATING; only failed scenes are re-rendered.
     CreativeState.QC_REQUIRED: frozenset(
         {CreativeState.READY, CreativeState.GENERATING, CreativeState.FAILED}
@@ -49,9 +51,16 @@ TRANSITIONS: dict[CreativeState, frozenset[CreativeState]] = {
         }
     ),
     # Retry remaining targets after partial success or operator action.
-    CreativeState.PARTIAL: frozenset({CreativeState.PUBLISHING, CreativeState.PUBLISHED}),
+    CreativeState.PARTIAL: frozenset(
+        {CreativeState.SCHEDULED, CreativeState.PUBLISHING, CreativeState.PUBLISHED}
+    ),
     CreativeState.NEEDS_ACTION: frozenset(
-        {CreativeState.PUBLISHING, CreativeState.SCHEDULED, CreativeState.PUBLISHED}
+        {
+            CreativeState.GENERATING,
+            CreativeState.PUBLISHING,
+            CreativeState.SCHEDULED,
+            CreativeState.PUBLISHED,
+        }
     ),
     CreativeState.PUBLISHED: frozenset(),
     CreativeState.FAILED: frozenset(),
@@ -78,7 +87,7 @@ def advance(current: CreativeState, target: CreativeState) -> CreativeState:
     return target
 
 
-class JobStatus(str, enum.Enum):
+class JobStatus(StrEnum):
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
     SUCCEEDED = "SUCCEEDED"
@@ -86,7 +95,7 @@ class JobStatus(str, enum.Enum):
     CANCELLED = "CANCELLED"
 
 
-class PublishTargetStatus(str, enum.Enum):
+class PublishTargetStatus(StrEnum):
     PENDING = "PENDING"
     VALIDATED = "VALIDATED"
     UPLOADING = "UPLOADING"
@@ -97,7 +106,7 @@ class PublishTargetStatus(str, enum.Enum):
     FAILED = "FAILED"
 
 
-class Capability(str, enum.Enum):
+class Capability(StrEnum):
     DIRECT = "DIRECT"
     SCHEDULE = "SCHEDULE"
     DRAFT = "DRAFT"
@@ -105,19 +114,19 @@ class Capability(str, enum.Enum):
     BLOCKED = "BLOCKED"
 
 
-class Platform(str, enum.Enum):
+class Platform(StrEnum):
     YOUTUBE = "youtube"
     FACEBOOK = "facebook"
     TIKTOK = "tiktok"
     ZALO = "zalo"
 
 
-class Locale(str, enum.Enum):
+class Locale(StrEnum):
     VI = "vi"
     EN = "en"
 
 
-class Role(str, enum.Enum):
+class Role(StrEnum):
     ADMIN = "admin"
     EDITOR = "editor"
     PUBLISHER = "publisher"

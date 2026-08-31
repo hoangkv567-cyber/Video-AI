@@ -1,12 +1,19 @@
 """TopicDiscoveryService: 2-source rule, window widening, scoring, persistence."""
 
+import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.orm import Session
 
 from app.ai.base import FakeResearchProvider, SourceInfo, TopicCandidate
-from app.ai.gemini import extract_json, parse_topic_candidates
+from app.ai.gemini import (
+    GeminiResearchProvider,
+    GeminiScriptProvider,
+    extract_json,
+    parse_topic_candidates,
+)
 from app.ai.topics import (
     PRIMARY_WINDOW_HOURS,
     WIDENED_WINDOW_HOURS,
@@ -128,8 +135,7 @@ class TestWindowWidening:
         provider = FakeResearchProvider(
             by_window={
                 PRIMARY_WINDOW_HOURS: [
-                    make_candidate(f"Topic {i}", ["openai.com", "techcrunch.com"])
-                    for i in range(3)
+                    make_candidate(f"Topic {i}", ["openai.com", "techcrunch.com"]) for i in range(3)
                 ]
             }
         )
@@ -162,9 +168,7 @@ class TestScoring:
 
     def test_computed_cross_verification_rewards_domains_and_official(self) -> None:
         service = TopicDiscoveryService(FakeResearchProvider(), now=fixed_now)
-        unofficial = service.score(
-            make_candidate("U", ["a.com", "b.com"], official_first=False)
-        )
+        unofficial = service.score(make_candidate("U", ["a.com", "b.com"], official_first=False))
         official = service.score(make_candidate("O", ["a.com", "b.com"], official_first=True))
         assert unofficial.cross_verification == pytest.approx(1 / 3)
         assert official.cross_verification == pytest.approx(1 / 3 + 0.25)
@@ -241,3 +245,86 @@ class TestGeminiParsing:
         assert topic.visual_potential == pytest.approx(1.0)
         assert [s.accessed_at for s in topic.sources] == [NOW, NOW]
         assert independent_domains(topic) == {"nvidia.com", "reuters.com"}
+
+
+class RecordingModels:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.calls: list[dict] = []
+
+    def generate_content(self, **kwargs: object) -> SimpleNamespace:
+        self.calls.append(kwargs)
+        return SimpleNamespace(text=self.text, candidates=[])
+
+
+class RecordingClient:
+    def __init__(self, text: str) -> None:
+        self.models = RecordingModels(text)
+
+
+def _grounded_response(text: str, urls: list[str]) -> SimpleNamespace:
+    chunks = [
+        SimpleNamespace(web=SimpleNamespace(uri=url, title=f"Grounded {index}"))
+        for index, url in enumerate(urls)
+    ]
+    return SimpleNamespace(
+        text=text,
+        candidates=[
+            SimpleNamespace(
+                grounding_metadata=SimpleNamespace(grounding_chunks=chunks)
+            )
+        ],
+    )
+
+
+class StaticModels:
+    def __init__(self, response: object) -> None:
+        self.response = response
+
+    def generate_content(self, **kwargs: object) -> object:
+        del kwargs
+        return self.response
+
+
+class TestGemini37Compatibility:
+    def test_research_omits_removed_sampling_parameters(self) -> None:
+        client = RecordingClient('{"topics": []}')
+        provider = GeminiResearchProvider(client=client, model_id="gemini-3.7-flash")
+
+        assert provider.research("AI news", "ai", 72) == []
+        config = client.models.calls[0]["config"]
+        assert config == {"tools": [{"google_search": {}}]}
+
+    def test_structured_output_omits_removed_sampling_parameters(self) -> None:
+        client = RecordingClient('{"schema_version": "1.0"}')
+        provider = GeminiScriptProvider(client=client, model_id="gemini-3.7-flash")
+
+        result = provider.generate_plan("A topic", [], "A brief")
+        assert result == {"schema_version": "1.0"}
+        assert client.models.calls[0]["config"] == {"response_mime_type": "application/json"}
+
+    def test_research_drops_model_claimed_url_not_present_in_grounding(self) -> None:
+        raw = {
+            "topics": [
+                {
+                    "title": "Grounded topic",
+                    "sources": [
+                        {"url": "https://openai.com/grounded"},
+                        {"url": "https://hallucinated.example/fake"},
+                    ],
+                }
+            ]
+        }
+        response = _grounded_response(
+            json.dumps(raw), ["https://openai.com/official-source"]
+        )
+        provider = GeminiResearchProvider(
+            client=SimpleNamespace(models=StaticModels(response)),
+            model_id="gemini-3.7-flash",
+        )
+
+        candidates = provider.research("AI news", "ai", 72)
+
+        assert [source.url for source in candidates[0].sources] == [
+            "https://openai.com/grounded"
+        ]

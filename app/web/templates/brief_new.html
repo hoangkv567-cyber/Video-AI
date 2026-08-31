@@ -6,7 +6,7 @@
 <section class="card">
   <h2>Tìm chủ đề từ brief</h2>
   <p class="muted">Hệ thống tìm chủ đề AI/công nghệ trong 72 giờ gần nhất, chỉ giữ chủ đề có ít nhất hai nguồn độc lập.</p>
-  <form hx-post="/api/v1/topics/discover" hx-ext="json-enc" hx-target="#topics-result" hx-swap="innerHTML">
+  <form id="discover-form" data-api-url="/api/v1/topics/discover">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>Tên chiến dịch
       <input type="text" name="campaign_name" required placeholder="Ví dụ: Tin AI tuần 34">
@@ -30,7 +30,7 @@
 
 <section class="card">
   <h2>Tạo creative trực tiếp</h2>
-  <form hx-post="/api/v1/creatives" hx-ext="json-enc" hx-target="#creative-result" hx-swap="innerHTML">
+  <form id="direct-creative-form" data-api-url="/api/v1/creatives">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>Chiến dịch có sẵn
       <select name="campaign_id">

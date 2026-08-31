@@ -81,7 +81,10 @@ class FacebookPublisher(Publisher):
                 raise PublishError("reels start phase returned no video_id/upload_url")
             return {"video_id": payload["video_id"], "upload_url": payload["upload_url"]}
 
-        session = self._run(_start)
+        session = self._run(
+            _start,
+            lambda: self._ambiguous_outcome("video_reels.start"),
+        )
         self.record_api_call("video_reels.start")
         return session
 
@@ -89,16 +92,16 @@ class FacebookPublisher(Publisher):
         upload_url = session["upload_url"]
         video_id = session["video_id"]
 
-        if ctx.file_url:
-            headers = {"Authorization": f"OAuth {self._token()}", "file_url": ctx.file_url}
-            content = b""
-        elif ctx.file_path:
+        if ctx.file_path and Path(ctx.file_path).exists():
             content = Path(ctx.file_path).read_bytes()
             headers = {
                 "Authorization": f"OAuth {self._token()}",
                 "offset": "0",
                 "file_size": str(len(content)),
             }
+        elif ctx.file_url:
+            headers = {"Authorization": f"OAuth {self._token()}", "file_url": ctx.file_url}
+            content = b""
         else:
             raise PublishNeedsAction("facebook upload requires file_path or file_url")
 
@@ -154,7 +157,10 @@ class FacebookPublisher(Publisher):
             raise_for_publish_status(response, context="facebook.video_reels.finish")
             return response.json()
 
-        payload = self._run(_finish)
+        payload = self._run(
+            _finish,
+            lambda: self._ambiguous_outcome("video_reels.finish"),
+        )
         self.record_api_call("video_reels.finish")
         return PublishResult(
             remote_post_id=str(payload.get("post_id") or video_id),
@@ -164,6 +170,58 @@ class FacebookPublisher(Publisher):
                 "video_id": video_id,
             },
             raw=payload,
+        )
+
+    def recover_upload(
+        self, ctx: PublishContext, session: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Accept only a remotely proven completed upload."""
+        video_id = session.get("video_id")
+        if not video_id:
+            return None
+        try:
+            status = self.poll_status(str(video_id))
+        except PublishError:
+            return None
+        upload_status = status.get("uploading_phase", {}).get("status")
+        if str(upload_status).lower() not in {"complete", "completed"}:
+            return None
+        recovered = dict(session)
+        recovered["upload_response"] = {
+            "success": True,
+            "recovered_from_status_probe": True,
+        }
+        return recovered
+
+    def recover_finalize(
+        self, ctx: PublishContext, session: dict[str, Any]
+    ) -> PublishResult | None:
+        """Prove the Reels finish phase completed before recording success."""
+        video_id = session.get("video_id")
+        if not video_id:
+            return None
+        try:
+            status = self.poll_status(str(video_id))
+        except PublishError:
+            return None
+        publishing = status.get("publishing_phase", {})
+        publish_status = str(publishing.get("status", "")).lower()
+        video_status = str(status.get("video_status", "")).lower()
+        if publish_status not in {"complete", "completed"} and video_status not in {
+            "published",
+            "scheduled",
+        }:
+            return None
+        _, scheduled_ts = self._schedule_state(ctx)
+        return PublishResult(
+            remote_post_id=str(video_id),
+            remote_status={
+                "video_state": "SCHEDULED" if scheduled_ts is not None else "PUBLISHED",
+                "scheduled_publish_time": scheduled_ts,
+                "video_id": video_id,
+                "recovered_from_status_probe": True,
+            },
+            raw=status,
         )
 
     def poll_status(self, remote_post_id: str) -> dict[str, Any]:

@@ -87,7 +87,10 @@ class TikTokPublisher(Publisher):
                 raise PublishError("tiktok inbox init returned no publish_id/upload_url")
             return {"publish_id": data["publish_id"], "upload_url": data["upload_url"]}
 
-        session = self._run(_init)
+        session = self._run(
+            _init,
+            lambda: self._ambiguous_outcome("inbox.init"),
+        )
         session["video_size"] = size
         self.record_api_call("inbox.init")
         return session
@@ -141,6 +144,34 @@ class TikTokPublisher(Publisher):
             },
             raw=session.get("upload_response", {}),
         )
+
+    def recover_upload(
+        self, ctx: PublishContext, session: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        publish_id = session.get("publish_id")
+        if not publish_id:
+            return None
+        try:
+            status = self.poll_status(str(publish_id))
+        except PublishError:
+            return None
+        if status.get("status") not in _UPLOAD_EXISTS_STATUSES:
+            return None
+        recovered = dict(session)
+        recovered["upload_response"] = {
+            "uploaded": True,
+            "recovered_from_status_probe": True,
+        }
+        return recovered
+
+    def recover_finalize(
+        self, ctx: PublishContext, session: dict[str, Any]
+    ) -> PublishResult | None:
+        # Upload-to-Inbox finalize is a local projection of publish_id; the
+        # user performs the actual publish in TikTok.
+        if not session.get("publish_id"):
+            return None
+        return self.finalize(ctx, session)
 
     def poll_status(self, remote_post_id: str) -> dict[str, Any]:
         def _fetch() -> dict[str, Any]:

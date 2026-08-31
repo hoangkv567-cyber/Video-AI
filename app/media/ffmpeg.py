@@ -282,8 +282,9 @@ class LoudnormMeasurement:
     target_offset: float
 
 
-def _loudnorm_target() -> str:
-    return f"loudnorm=I={_fmt(TARGET_LUFS)}:TP={_fmt(TARGET_TRUE_PEAK_DBTP)}:LRA={_fmt(TARGET_LRA)}"
+def _loudnorm_target(tp: float | None = None) -> str:
+    target_tp = tp if tp is not None else TARGET_TRUE_PEAK_DBTP
+    return f"loudnorm=I={_fmt(TARGET_LUFS)}:TP={_fmt(target_tp)}:LRA={_fmt(TARGET_LRA)}"
 
 
 def loudnorm_measure_cmd(input_path: str) -> list[str]:
@@ -303,23 +304,48 @@ def loudnorm_measure_cmd(input_path: str) -> list[str]:
     ]
 
 
+# Safety margin (dB) below the linear-mode true-peak ceiling; accounts for
+# AAC encoding overshoot measured on final renders (~0.2-0.5 dB).
+LOUDNORM_LINEAR_HEADROOM_DB = 0.3
+
+
+def loudnorm_linear_ok(measured: LoudnormMeasurement, target_tp: float) -> bool:
+    """Linear mode only when the required gain keeps peaks under the ceiling.
+
+    A single static gain reaches -14 LUFS only if ``input_tp + gain`` stays
+    below ``target_tp - headroom``. Otherwise linear mode silently lands under
+    the loudness target (observed -15 LUFS on EN voiceovers) and dynamic mode
+    must be used instead.
+    """
+    gain = TARGET_LUFS - measured.input_i
+    return measured.input_tp + gain <= target_tp - LOUDNORM_LINEAR_HEADROOM_DB
+
+
 def loudnorm_apply_cmd(
     input_path: str,
     output_path: str,
     measured: LoudnormMeasurement,
+    *,
+    target_tp: float = -2.0,
+    linear: bool | None = None,
 ) -> list[str]:
-    """Pass 2: apply linear normalization using pass-1 measurements.
+    """Pass 2: apply normalization using pass-1 measurements.
 
     Video is stream-copied (visual master unchanged); audio re-encoded AAC 48 kHz.
+    Target TP is -2.0 dBTP by default to provide headroom against AAC compression overshoot.
+    ``linear`` defaults to :func:`loudnorm_linear_ok`: dynamic mode when a static
+    gain would clip peaks or miss the loudness target.
     """
+    if linear is None:
+        linear = loudnorm_linear_ok(measured, target_tp)
     af = (
-        f"{_loudnorm_target()}"
+        f"{_loudnorm_target(tp=target_tp)}"
         f":measured_I={_fmt(measured.input_i)}"
         f":measured_TP={_fmt(measured.input_tp)}"
         f":measured_LRA={_fmt(measured.input_lra)}"
         f":measured_thresh={_fmt(measured.input_thresh)}"
         f":offset={_fmt(measured.target_offset)}"
-        ":linear=true:print_format=summary"
+        f":linear={'true' if linear else 'false'}:print_format=summary"
     )
     return [
         "ffmpeg",
@@ -372,6 +398,37 @@ def parse_loudnorm_json(stderr_text: str) -> LoudnormMeasurement:
 # ---------------------------------------------------------------------------
 # Caption burn-in
 # ---------------------------------------------------------------------------
+
+
+def portrait_crop_image_cmd(
+    input_path: str, output_path: str, *, width: int = TARGET_WIDTH, height: int = TARGET_HEIGHT
+) -> list[str]:
+    """Normalize a still keyframe to the vertical master frame (9:16).
+
+    Keyframe sources are arbitrary (HD photo search returns landscape/square
+    images). Downstream consumers animate whatever aspect they are given, and
+    the clip normalizer would then center-crop away both sides. Scaling to
+    cover and cropping HERE keeps the composition decision at the keyframe
+    stage, where a portrait candidate can also be preferred at fetch time.
+    """
+    vf = (
+        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},setsar=1"
+    )
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        input_path,
+        "-vf",
+        vf,
+        "-frames:v",
+        "1",
+        output_path,
+    ]
 
 
 def default_force_style() -> str:

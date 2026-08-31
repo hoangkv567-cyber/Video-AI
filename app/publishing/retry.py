@@ -61,7 +61,8 @@ def raise_for_publish_status(response: httpx.Response, *, context: str = "") -> 
     """Map an HTTP response onto the typed publish errors.
 
     2xx/3xx pass through; 401 raises PublishTokenExpired (refresh path);
-    408/429/5xx raise PublishRetryable; every other 4xx is a permission,
+    408 raises PublishTimeout so a status probe is mandatory; 429/5xx raise
+    PublishRetryable; every other 4xx is a permission,
     policy or validation failure and raises PublishNeedsAction (no retry).
     """
     code = response.status_code
@@ -70,6 +71,13 @@ def raise_for_publish_status(response: httpx.Response, *, context: str = "") -> 
     details = {"status_code": code, "context": context}
     if code == 401:
         raise PublishTokenExpired(f"credentials rejected by upstream ({context})", details=details)
+    if code == 408:
+        raise PublishTimeout(
+            f"upstream request timed out ({context})",
+            remote_status_code=code,
+            retry_after=_parse_retry_after(response),
+            details=details,
+        )
     if is_retryable_status(code):
         raise PublishRetryable(
             f"retryable upstream error {code} ({context})",

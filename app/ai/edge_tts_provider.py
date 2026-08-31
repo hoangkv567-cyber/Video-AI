@@ -22,6 +22,8 @@ default factory only).
 from __future__ import annotations
 
 import asyncio
+import random
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -31,6 +33,7 @@ from app.ai.base import Timepoint, TTSResult
 from app.ai.groq_providers import strip_ssml
 from app.ai.tts import END_MARK, split_sentences
 from app.config import ModelConfig, get_model_config
+from app.errors import UpstreamError
 
 #: edge-tts has no configured EN voice in ModelConfig (Groq covers EN); this is
 #: the fallback when the operator selects ``tts_provider_en=edge`` anyway.
@@ -38,6 +41,13 @@ DEFAULT_VOICE_EN = "en-US-AriaNeural"
 
 TICKS_PER_SECOND = 10_000_000  # WordBoundary offsets/durations are 100 ns ticks
 AUDIO_MIME_TYPE = "audio/mpeg"  # edge-tts default output is MP3
+
+#: The endpoint is unofficial and flakes (``NoAudioReceived``, websocket/auth
+#: hiccups). Retry in place with backoff; if it still fails, surface a
+#: retryable UpstreamError so the generate job stays resumable instead of
+#: bricking the creative into the terminal FAILED state.
+STREAM_ATTEMPTS = 3
+RETRY_BASE_DELAY_SECONDS = 2.0
 
 
 def ticks_to_seconds(ticks: float | int) -> float:
@@ -111,7 +121,7 @@ class EdgeTTSProvider:
 
     def synthesize(self, *, ssml: str, voice: str, language_code: str) -> TTSResult:
         text = strip_ssml(ssml)
-        audio, boundaries = self._run_async(self._collect_stream(text))
+        audio, boundaries = self._synthesize_with_retry(text)
         timepoints = sentence_timepoints(text, boundaries)
         duration = round(boundaries[-1].end_seconds, 4) if boundaries else 0.0
         return TTSResult(
@@ -121,6 +131,24 @@ class EdgeTTSProvider:
             voice=self._voice,
             audio_mime_type=AUDIO_MIME_TYPE,
         )
+
+    def _synthesize_with_retry(self, text: str) -> tuple[bytes, list[WordBoundary]]:
+        last_error: Exception | None = None
+        for attempt in range(1, STREAM_ATTEMPTS + 1):
+            try:
+                return self._run_async(self._collect_stream(text))
+            except Exception as exc:  # noqa: BLE001 — every stream error is retry-worthy
+                last_error = exc
+                if attempt < STREAM_ATTEMPTS:
+                    delay = RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+                    delay += random.uniform(0, delay / 2)  # full jitter ceiling
+                    time.sleep(delay)
+        raise UpstreamError(
+            f"edge-tts synthesis failed after {STREAM_ATTEMPTS} attempts: "
+            f"{type(last_error).__name__}",
+            retryable=True,
+            details={"voice": self._voice, "attempts": STREAM_ATTEMPTS},
+        ) from last_error
 
     async def _collect_stream(self, text: str) -> tuple[bytes, list[WordBoundary]]:
         communicate = self._communicate_factory(text, self._voice)

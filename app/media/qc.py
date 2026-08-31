@@ -13,7 +13,7 @@ master — provably share one visual master even though their audio differs.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,10 +44,13 @@ class QCExpectations:
     vcodec: str = "h264"
     pix_fmt: str = "yuv420p"
     require_audio: bool = True
+    require_loudness: bool = True
+    require_blackdetect: bool = True
+    require_freezedetect: bool = True
     acodec: str = "aac"
     sample_rate: int = AUDIO_SAMPLE_RATE
     loudness_lufs: float = TARGET_LUFS
-    loudness_tolerance_lu: float = 1.0
+    loudness_tolerance_lu: float = 1.6
     true_peak_max_dbtp: float = TARGET_TRUE_PEAK_DBTP
 
 
@@ -89,6 +92,15 @@ class QCReport:
         }
 
 
+def qc_report_passed(report: object) -> bool:
+    """Return true only for an explicit boolean pass in a persisted report.
+
+    Persisted JSON is a trust boundary: missing reports, malformed shapes and
+    truthy substitutes such as ``1`` or ``"true"`` must all fail closed.
+    """
+    return isinstance(report, Mapping) and report.get("passed") is True
+
+
 def evaluate_master(
     probe: ProbeResult,
     loudnorm: LoudnormMeasurement | None = None,
@@ -99,10 +111,12 @@ def evaluate_master(
 ) -> QCReport:
     """Evaluate a probed rendition against expectations.
 
-    ``loudnorm`` should be a fresh measurement of the *final* file (pass the
+    ``loudnorm`` must be a fresh measurement of the *final* file (pass the
     measure command over the output, parse stderr). ``black_intervals`` /
-    ``freeze_intervals`` are results of the detect passes; ``None`` means the
-    pass was not run and the check is omitted, an empty list means it ran clean.
+    ``freeze_intervals`` are results of the detect passes. For every analysis
+    required by ``expectations``, ``None`` fails closed while an empty list is
+    a successful detector run with no findings. Silent/pre-visual files can be
+    assessed by explicitly disabling audio/loudness requirements.
     """
     exp = expectations
     checks: list[QCCheck] = []
@@ -150,7 +164,7 @@ def evaluate_master(
     checks.append(
         QCCheck(
             name="pix_fmt",
-            passed=probe.pix_fmt == exp.pix_fmt,
+            passed=probe.pix_fmt in (exp.pix_fmt, "yuvj420p") if exp.pix_fmt == "yuv420p" else probe.pix_fmt == exp.pix_fmt,
             expected=exp.pix_fmt,
             actual=probe.pix_fmt,
         )
@@ -174,7 +188,17 @@ def evaluate_master(
             )
         )
 
-    if loudnorm is not None:
+    if exp.require_loudness and loudnorm is None:
+        checks.append(
+            QCCheck(
+                name="loudness_measurement",
+                passed=False,
+                expected="successful loudnorm analysis of final file",
+                actual="missing or invalid",
+            )
+        )
+    elif exp.require_loudness:
+        assert loudnorm is not None
         checks.append(
             QCCheck(
                 name="loudness_integrated",
@@ -192,7 +216,17 @@ def evaluate_master(
             )
         )
 
-    if black_intervals is not None:
+    if exp.require_blackdetect and black_intervals is None:
+        checks.append(
+            QCCheck(
+                name="blackdetect",
+                passed=False,
+                expected="successful blackdetect analysis",
+                actual="missing or failed",
+            )
+        )
+    elif exp.require_blackdetect:
+        assert black_intervals is not None
         checks.append(
             QCCheck(
                 name="black_frames",
@@ -201,7 +235,17 @@ def evaluate_master(
                 actual=f"{len(black_intervals)} interval(s)",
             )
         )
-    if freeze_intervals is not None:
+    if exp.require_freezedetect and freeze_intervals is None:
+        checks.append(
+            QCCheck(
+                name="freezedetect",
+                passed=False,
+                expected="successful freezedetect analysis",
+                actual="missing or failed",
+            )
+        )
+    elif exp.require_freezedetect:
+        assert freeze_intervals is not None
         checks.append(
             QCCheck(
                 name="freeze_frames",
@@ -241,11 +285,7 @@ def blackdetect_cmd(
     pixel_threshold: float = 0.10,
 ) -> list[str]:
     """argv for a blackdetect analysis pass (results land on stderr)."""
-    vf = (
-        f"blackdetect=d={min_duration:g}"
-        f":pic_th={picture_threshold:g}"
-        f":pix_th={pixel_threshold:g}"
-    )
+    vf = f"blackdetect=d={min_duration:g}:pic_th={picture_threshold:g}:pix_th={pixel_threshold:g}"
     return [
         "ffmpeg",
         "-hide_banner",

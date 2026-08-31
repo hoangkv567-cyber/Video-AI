@@ -61,6 +61,8 @@ class AssetStore(Protocol):
 
     def exists(self, key: str) -> bool: ...
 
+    def delete(self, key: str) -> bool: ...
+
 
 class LocalDirBackend:
     """Filesystem-backed store for dev and tests (root from env or ./media_cache)."""
@@ -96,6 +98,13 @@ class LocalDirBackend:
 
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
+
+    def delete(self, key: str) -> bool:
+        path = self._path(key)
+        if path.is_file():
+            path.unlink()
+            return True
+        return False
 
 
 class MinIOBackend:
@@ -170,6 +179,13 @@ class MinIOBackend:
             if exc.code in {"NoSuchKey", "NoSuchObject", "NoSuchBucket"}:
                 return False
             raise
+        return True
+
+    def delete(self, key: str) -> bool:
+        client = self._get_client()
+        if not self.exists(key):
+            return False
+        client.remove_object(self._bucket, _validate_key(key))
         return True
 
 

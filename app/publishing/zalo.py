@@ -85,6 +85,12 @@ class ZaloPublisher(Publisher):
             self._needs_action_with_bundle(ctx)
         return {"api": "zalo_oa"}
 
+    def recover_prepare(self, ctx: PublishContext) -> dict[str, Any] | None:
+        # Zalo's prepare phase is entirely local and therefore safe to rebuild.
+        if self._capability not in _API_CAPABLE:
+            return None
+        return {"api": "zalo_oa"}
+
     def upload(self, ctx: PublishContext, session: dict[str, Any]) -> dict[str, Any]:
         if self._capability not in _API_CAPABLE:
             self._needs_action_with_bundle(ctx)
@@ -104,7 +110,10 @@ class ZaloPublisher(Publisher):
             raise_for_publish_status(response, context="zalo.upload.video")
             return _check_zalo_payload(response.json(), "zalo.upload.video")
 
-        payload = self._run(_upload)
+        payload = self._run(
+            _upload,
+            lambda: self._ambiguous_outcome("upload.video"),
+        )
         video_token = payload.get("data", {}).get("token")
         if not video_token:
             raise PublishError("zalo video upload returned no token")
@@ -135,7 +144,10 @@ class ZaloPublisher(Publisher):
             raise_for_publish_status(response, context="zalo.article.create")
             return _check_zalo_payload(response.json(), "zalo.article.create")
 
-        payload = self._run(_create)
+        payload = self._run(
+            _create,
+            lambda: self._ambiguous_outcome("article.create"),
+        )
         creation_token = payload.get("data", {}).get("token")
         if not creation_token:
             raise PublishError("zalo article create returned no token")

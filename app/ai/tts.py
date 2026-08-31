@@ -90,10 +90,15 @@ class TTSService:
         provider: TTSProvider,
         ledger: CostLedger,
         model_config: ModelConfig | None = None,
+        *,
+        model_id: str | None = None,
+        unit_price_usd: float | None = None,
     ) -> None:
         self._provider = provider
         self._ledger = ledger
         self._cfg = model_config or get_model_config()
+        self._model_id = model_id
+        self._unit_price_usd = unit_price_usd
 
     def voice_for(self, locale: str) -> str:
         if locale == "vi":
@@ -114,7 +119,11 @@ class TTSService:
         language_code = LANGUAGE_CODES[locale]
         ssml = build_ssml(text)
         char_count = len(text)
-        price_per_char = tts_price_per_char_usd(self._cfg)
+        price_per_char = (
+            tts_price_per_char_usd(self._cfg)
+            if self._unit_price_usd is None
+            else self._unit_price_usd
+        )
         cost = char_count * price_per_char
 
         self._ledger.check_cap(creative, cost)
@@ -122,7 +131,7 @@ class TTSService:
         self._ledger.record_actual(
             creative.id,
             kind="tts",
-            model_id=voice,
+            model_id=self._model_id or result.voice,
             units=float(char_count),
             unit_price_usd=price_per_char,
             note=f"tts {locale} scene narration",
@@ -135,7 +144,7 @@ class TTSService:
         )
         return SceneAudio(
             locale=locale,
-            voice=voice,
+            voice=result.voice,
             audio_bytes=result.audio_bytes,
             audio_mime_type=result.audio_mime_type,
             timepoints=result.timepoints,

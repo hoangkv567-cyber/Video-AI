@@ -41,7 +41,9 @@ CFG = ModelConfig()
 SAMPLE_RATE = 24000
 
 
-def make_wav(seconds: float, *, rate: int = SAMPLE_RATE, channels: int = 1, width: int = 2) -> bytes:
+def make_wav(
+    seconds: float, *, rate: int = SAMPLE_RATE, channels: int = 1, width: int = 2
+) -> bytes:
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as writer:
         writer.setnchannels(channels)
@@ -195,12 +197,12 @@ class TestGroqTTSProvider:
             return httpx.Response(200, content=make_wav(0.2))
 
         provider = GroqTTSProvider(
-            api_key="test-key", model_config=CFG, http_client=make_client(handler),
+            api_key="test-key",
+            model_config=CFG,
+            http_client=make_client(handler),
             sleep=sleeps.append,
         )
-        result = provider.synthesize(
-            ssml=build_ssml("Hi there."), voice="v", language_code="en-US"
-        )
+        result = provider.synthesize(ssml=build_ssml("Hi there."), voice="v", language_code="en-US")
         assert calls["n"] == 2
         assert len(sleeps) == 1  # one backoff sleep between the attempts
         assert result.duration_seconds == pytest.approx(0.2)
@@ -223,13 +225,55 @@ class TestGroqTTSProvider:
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls["n"] += 1
-            return httpx.Response(400, json={"error": "bad request"})
+            return httpx.Response(
+                400,
+                json={"error": {"message": "hidden detail", "code": "model_terms_required"}},
+            )
 
         provider = tts_provider(handler)
         with pytest.raises(UpstreamError) as excinfo:
             provider.synthesize(ssml=build_ssml("Hi."), voice="v", language_code="en-US")
         assert excinfo.value.retryable is False
+        assert excinfo.value.details["provider_code"] == "model_terms_required"
+        assert "hidden detail" not in excinfo.value.message
         assert calls["n"] == 1
+
+    def test_json_validate_failed_400_is_retried(self) -> None:
+        """Groq's json_object output-validation flake resolves on retry."""
+        calls = {"n": 0}
+        sleeps: list[float] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(
+                    400, json={"error": {"code": "json_validate_failed"}}
+                )
+            return httpx.Response(200, content=make_wav(0.2))
+
+        provider = GroqTTSProvider(
+            api_key="test-key",
+            model_config=CFG,
+            http_client=make_client(handler),
+            sleep=sleeps.append,
+        )
+        result = provider.synthesize(ssml=build_ssml("Hi."), voice="v", language_code="en-US")
+        assert calls["n"] == 2
+        assert len(sleeps) == 1
+        assert result.duration_seconds == pytest.approx(0.2)
+
+    def test_persistent_json_validate_failed_exhausts_as_retryable(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(400, json={"error": {"code": "json_validate_failed"}})
+
+        provider = tts_provider(handler)
+        with pytest.raises(UpstreamError) as excinfo:
+            provider.synthesize(ssml=build_ssml("Hi."), voice="v", language_code="en-US")
+        assert excinfo.value.retryable is True
+        assert calls["n"] == 3
 
     def test_vietnamese_rejected_before_any_http_call(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -316,7 +360,11 @@ class TestGroqWhisperAligner:
         assert b"mix.wav" in body and b"RIFF-fake-audio" in body
 
         assert [w.word for w in transcription.words] == [
-            "Hello", "world", "today", "Goodbye", "now",
+            "Hello",
+            "world",
+            "today",
+            "Goodbye",
+            "now",
         ]
         assert transcription.words[3].start == pytest.approx(2.0)
         assert transcription.duration_seconds == pytest.approx(3.0)
@@ -398,6 +446,9 @@ class TestGroqScriptProvider:
         payload = captured["json"]
         assert payload["model"] == CFG.groq_llm_model
         assert payload["response_format"] == {"type": "json_object"}
+        assert payload["reasoning_format"] == "hidden"
+        assert payload["reasoning_effort"] == "low"
+        assert payload["max_completion_tokens"] == CFG.groq_llm_max_completion_tokens
         assert "New AI model launch" in payload["messages"][0]["content"]
         assert "https://example.com/post" in payload["messages"][0]["content"]
 

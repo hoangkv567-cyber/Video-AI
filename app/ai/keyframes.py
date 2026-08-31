@@ -9,6 +9,7 @@ import hashlib
 from dataclasses import dataclass
 
 from app.ai.base import ImageProvider
+from app.ai.procedural import ProceduralImageProvider
 from app.config import ModelConfig, get_model_config
 from app.costs import CostLedger, image_price_usd
 from app.models import Creative
@@ -94,13 +95,15 @@ class KeyframeService:
         )
 
     def generate_scene_keyframe(
-        self, creative: Creative, plan: VideoPlan, scene_index: int
+        self, creative: Creative, plan: VideoPlan, scene_index: int, *, brightness_hint: str = ""
     ) -> KeyframeImage:
         scene = next(s for s in plan.scenes if s.index == scene_index)
-        prompt = build_keyframe_prompt(plan, scene)
+        canonical_prompt = build_keyframe_prompt(plan, scene)
+        prompt = f"{canonical_prompt} {brightness_hint}".strip() if brightness_hint else canonical_prompt
         return self._generate(
             creative,
             prompt,
+            hash_prompt=canonical_prompt,
             negative_prompt=scene.negative_prompt_en,
             kind=KIND_KEYFRAME,
             scene_index=scene.index,
@@ -125,19 +128,26 @@ class KeyframeService:
         negative_prompt: str,
         kind: str,
         scene_index: int | None,
+        hash_prompt: str | None = None,
     ) -> KeyframeImage:
-        price = image_price_usd(self._cfg)
+        price = 0.0 if isinstance(self._provider, ProceduralImageProvider) else image_price_usd(self._cfg)
         self._ledger.check_cap(creative, price)
         result = self._provider.generate_image(
             prompt, model_id=self._cfg.gemini_image_model, negative_prompt=negative_prompt
         )
+        is_free = (
+            isinstance(self._provider, ProceduralImageProvider)
+            or not result.model_id
+            or "gemini" not in result.model_id.lower()
+        )
+        actual_price = 0.0 if is_free else price
         note = f"{kind}" if scene_index is None else f"{kind} scene {scene_index}"
         self._ledger.record_actual(
             creative.id,
-            kind="gemini_image",
+            kind="free_image" if is_free else "gemini_image",
             model_id=result.model_id,
             units=1.0,
-            unit_price_usd=price,
+            unit_price_usd=actual_price,
             note=note,
         )
         return KeyframeImage(
@@ -146,9 +156,11 @@ class KeyframeService:
             prompt=prompt,
             negative_prompt=negative_prompt,
             model_id=result.model_id,
-            prompt_hash=prompt_hash(prompt, result.model_id),
+            # Hash the canonical prompt (``hash_prompt``) so retries that send
+            # the provider a nudged prompt still reuse the same asset slot.
+            prompt_hash=prompt_hash(hash_prompt or prompt, self._cfg.gemini_image_model),
             image_bytes=result.image_bytes,
             mime_type=result.mime_type,
             sha256=hashlib.sha256(result.image_bytes).hexdigest(),
-            cost_usd=price,
+            cost_usd=actual_price,
         )

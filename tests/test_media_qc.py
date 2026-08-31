@@ -20,6 +20,7 @@ from app.media.qc import (
     parse_blackdetect,
     parse_freezedetect,
     parse_hash_output,
+    qc_report_passed,
     renditions_share_visual_master,
     visual_checksum_cmd,
 )
@@ -96,8 +97,36 @@ def good_loudnorm(**overrides: object) -> LoudnormMeasurement:
     return dataclasses.replace(base, **overrides)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    ("report", "expected"),
+    [
+        ({"passed": True}, True),
+        (None, False),
+        ({}, False),
+        ({"passed": False}, False),
+        ({"passed": 1}, False),
+        ({"passed": "true"}, False),
+        ([{"passed": True}], False),
+    ],
+)
+def test_qc_report_passed_requires_explicit_boolean(report: object, expected: bool) -> None:
+    assert qc_report_passed(report) is expected
+
+
 def failed_names(report) -> set[str]:
     return {c.name for c in report.failures()}
+
+
+def evaluate_complete(
+    probe_result: ProbeResult,
+    loudnorm: LoudnormMeasurement,
+):
+    return evaluate_master(
+        probe_result,
+        loudnorm,
+        black_intervals=[],
+        freeze_intervals=[],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +192,7 @@ class TestProbe:
 
 class TestQCMatrix:
     def test_good_rendition_passes(self):
-        report = evaluate_master(good_probe(), good_loudnorm())
+        report = evaluate_complete(good_probe(), good_loudnorm())
         assert report.passed
         assert report.failures() == []
 
@@ -181,44 +210,58 @@ class TestQCMatrix:
         ],
     )
     def test_single_defect_flips_expected_check(self, overrides, expected_failed):
-        report = evaluate_master(good_probe(**overrides), good_loudnorm())
+        report = evaluate_complete(good_probe(**overrides), good_loudnorm())
         assert failed_names(report) == expected_failed
 
     def test_duration_within_tolerance_passes(self):
-        report = evaluate_master(good_probe(duration=38.5), good_loudnorm())
+        report = evaluate_complete(good_probe(duration=38.5), good_loudnorm())
         assert "duration" not in failed_names(report)
 
     def test_720x1280_fails_resolution_but_keeps_aspect(self):
-        report = evaluate_master(good_probe(width=720, height=1280), good_loudnorm())
+        report = evaluate_complete(good_probe(width=720, height=1280), good_loudnorm())
         assert failed_names(report) == {"resolution"}
 
     def test_loudness_out_of_band_fails(self):
-        report = evaluate_master(good_probe(), good_loudnorm(input_i=-16.0))
+        report = evaluate_complete(good_probe(), good_loudnorm(input_i=-16.0))
         assert failed_names(report) == {"loudness_integrated"}
 
     def test_loudness_within_1_lu_passes(self):
-        report = evaluate_master(good_probe(), good_loudnorm(input_i=-14.9))
+        report = evaluate_complete(good_probe(), good_loudnorm(input_i=-14.9))
         assert "loudness_integrated" not in failed_names(report)
 
     def test_true_peak_above_ceiling_fails(self):
-        report = evaluate_master(good_probe(), good_loudnorm(input_tp=-1.2))
+        report = evaluate_complete(good_probe(), good_loudnorm(input_tp=-1.2))
         assert failed_names(report) == {"true_peak"}
 
     def test_true_peak_at_ceiling_passes(self):
-        report = evaluate_master(good_probe(), good_loudnorm(input_tp=-1.5))
+        report = evaluate_complete(good_probe(), good_loudnorm(input_tp=-1.5))
         assert "true_peak" not in failed_names(report)
 
-    def test_no_loudnorm_omits_loudness_checks(self):
-        report = evaluate_master(good_probe())
-        names = {c.name for c in report.checks}
-        assert "loudness_integrated" not in names
-        assert "true_peak" not in names
+    def test_no_final_loudnorm_fails_closed(self):
+        report = evaluate_master(good_probe(), black_intervals=[], freeze_intervals=[])
+        assert failed_names(report) == {"loudness_measurement"}
 
     def test_silent_master_expectations(self):
         # The visual master (pre voice-over) is intentionally silent.
-        exp = QCExpectations(require_audio=False)
+        exp = QCExpectations(require_audio=False, require_loudness=False)
         report = evaluate_master(
-            good_probe(acodec=None, sample_rate=None), expectations=exp
+            good_probe(acodec=None, sample_rate=None),
+            expectations=exp,
+            black_intervals=[],
+            freeze_intervals=[],
+        )
+        assert report.passed
+
+    def test_previsual_can_explicitly_disable_optional_analysis_gates(self):
+        exp = QCExpectations(
+            require_audio=False,
+            require_loudness=False,
+            require_blackdetect=False,
+            require_freezedetect=False,
+        )
+        report = evaluate_master(
+            good_probe(acodec=None, sample_rate=None),
+            expectations=exp,
         )
         assert report.passed
 
@@ -237,14 +280,12 @@ class TestQCMatrix:
         )
         assert report.passed
 
-    def test_detection_not_run_omits_checks(self):
+    def test_detection_not_run_fails_closed(self):
         report = evaluate_master(good_probe(), good_loudnorm())
-        names = {c.name for c in report.checks}
-        assert "black_frames" not in names
-        assert "freeze_frames" not in names
+        assert failed_names(report) == {"blackdetect", "freezedetect"}
 
     def test_report_to_dict_json_serializable(self):
-        report = evaluate_master(good_probe(duration=10.0), good_loudnorm())
+        report = evaluate_complete(good_probe(duration=10.0), good_loudnorm())
         payload = json.loads(json.dumps(report.to_dict()))
         assert payload["passed"] is False
         assert any(c["name"] == "duration" and not c["passed"] for c in payload["checks"])

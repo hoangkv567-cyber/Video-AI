@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Never, Protocol, runtime_checkable
 
 import httpx
 
@@ -219,6 +219,28 @@ class Publisher(abc.ABC):
         """Determine the real capability of a connected account (registry hook)."""
         raise NotImplementedError
 
+    # -- crash-recovery hooks -----------------------------------------------
+
+    def recover_prepare(self, ctx: PublishContext) -> dict[str, Any] | None:
+        """Reconcile a worker death during ``prepare`` without repeating it.
+
+        ``None`` means the adapter cannot prove the remote outcome.  The
+        orchestrator must then fail closed and require operator action.
+        """
+        return None
+
+    def recover_upload(
+        self, ctx: PublishContext, session: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return a proven uploaded session, or ``None`` when still ambiguous."""
+        return None
+
+    def recover_finalize(
+        self, ctx: PublishContext, session: dict[str, Any]
+    ) -> PublishResult | None:
+        """Return a proven remote result, or ``None`` when still ambiguous."""
+        return None
+
     # -- shared plumbing -----------------------------------------------------
 
     @property
@@ -259,6 +281,17 @@ class Publisher(abc.ABC):
             )
 
         return run_with_token_refresh(_with_retry, self.refresh_credentials)
+
+    def _ambiguous_outcome(self, operation: str) -> Never:
+        """Fail closed when a mutating timeout cannot be reconciled remotely."""
+        raise PublishNeedsAction(
+            f"{self.platform} {operation} outcome is unknown; automatic retry is blocked",
+            details={
+                "reason": "remote_outcome_unknown",
+                "operation": operation,
+                "operator_action_required": True,
+            },
+        )
 
     def record_api_call(
         self,

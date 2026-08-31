@@ -109,7 +109,10 @@ class YouTubePublisher(Publisher):
                 raise PublishError("resumable init returned no upload Location header")
             return {"upload_url": upload_url}
 
-        session = self._run(_init)
+        session = self._run(
+            _init,
+            lambda: self._ambiguous_outcome("videos.insert.init"),
+        )
         self.record_api_call("videos.insert.init")
         return session
 
@@ -169,6 +172,47 @@ class YouTubePublisher(Publisher):
             },
             raw=video,
         )
+
+    def recover_upload(
+        self, ctx: PublishContext, session: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Query the resumable session; never create a second video resource."""
+        if not ctx.file_path or not session.get("upload_url"):
+            return None
+        data_size = Path(ctx.file_path).stat().st_size
+        try:
+            response = self._send(
+                lambda: self.client.put(
+                    str(session["upload_url"]),
+                    headers={
+                        **self._auth_headers(),
+                        "Content-Range": f"bytes */{data_size}",
+                    },
+                )
+            )
+        except PublishTimeout:
+            return None
+        if response.status_code not in (200, 201):
+            # 308 proves that the same resumable session is still available,
+            # but a blind full replay after a process death is unnecessary.
+            return None
+        payload = response.json()
+        if not payload.get("id"):
+            return None
+        recovered = dict(session)
+        recovered["video"] = payload
+        recovered["video_id"] = payload["id"]
+        self.record_api_call("videos.insert.recover")
+        return recovered
+
+    def recover_finalize(
+        self, ctx: PublishContext, session: dict[str, Any]
+    ) -> PublishResult | None:
+        # YouTube finalization is local: videos.insert already created the
+        # resource and returned all fields used by ``finalize``.
+        if not session.get("video_id"):
+            return None
+        return self.finalize(ctx, session)
 
     def poll_status(self, remote_post_id: str) -> dict[str, Any]:
         """videos.list with status + processingDetails."""

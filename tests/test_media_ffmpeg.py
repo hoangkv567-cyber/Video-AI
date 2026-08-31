@@ -12,11 +12,13 @@ from app.media.ffmpeg import (
     escape_drawtext_text,
     escape_filter_path,
     loudnorm_apply_cmd,
+    loudnorm_linear_ok,
     loudnorm_measure_cmd,
     mix_voiceover_cmd,
     normalize_clip_cmd,
     parse_loudnorm_json,
     platform_derivative_cmd,
+    portrait_crop_image_cmd,
     quote_filter_value,
     thumbnail_cmd,
 )
@@ -215,18 +217,37 @@ class TestLoudnorm:
 
     def test_apply_cmd_uses_measured_values(self):
         measured = parse_loudnorm_json(LOUDNORM_STDERR)
+        # input_tp + gain = -6.47 + 9.62 = +3.15 dBTP > ceiling -> dynamic mode.
+        assert loudnorm_linear_ok(measured, target_tp=-2.0) is False
         cmd = loudnorm_apply_cmd("mixed.mp4", "normalized.mp4", measured)
         af = arg_value(cmd, "-af")
-        assert af.startswith("loudnorm=I=-14:TP=-1.5:LRA=11:")
+        assert af.startswith("loudnorm=I=-14:TP=-2:LRA=11:")
         assert "measured_I=-23.62" in af
         assert "measured_TP=-6.47" in af
         assert "measured_LRA=2.3:" in af
         assert "measured_thresh=-34.13" in af
         assert "offset=0.03" in af
-        assert "linear=true" in af
+        assert "linear=false" in af
         assert has_pair(cmd, "-c:v", "copy")
         assert has_pair(cmd, "-c:a", "aac")
         assert has_pair(cmd, "-ar", "48000")
+
+    def test_apply_cmd_linear_when_headroom_allows(self):
+        measured = parse_loudnorm_json(LOUDNORM_STDERR)
+        # Quiet, low-peak input: linear gain reaches -14 LUFS under the ceiling.
+        linear_input = measured.__class__(
+            input_i=-20.0, input_tp=-18.0, input_lra=2.3, input_thresh=-30.0,
+            output_i=-14.0, output_tp=-12.0, output_lra=2.3, output_thresh=-24.0,
+            normalization_type="linear", target_offset=0.0,
+        )
+        assert loudnorm_linear_ok(linear_input, target_tp=-2.0) is True
+        cmd = loudnorm_apply_cmd("mixed.mp4", "normalized.mp4", linear_input)
+        assert "linear=true" in arg_value(cmd, "-af")
+        # Explicit override wins over the automatic decision.
+        forced = loudnorm_apply_cmd(
+            "mixed.mp4", "normalized.mp4", measured, linear=True
+        )
+        assert "linear=true" in arg_value(forced, "-af")
 
 
 # ---------------------------------------------------------------------------
@@ -372,3 +393,13 @@ class TestLoudnormMeasurementShape:
         )
         assert m.input_i == -20.0
         assert m.normalization_type == "linear"
+
+
+class TestPortraitCropImage:
+    def test_cmd_scales_to_cover_and_crops(self):
+        cmd = portrait_crop_image_cmd("in.jpg", "out.png")
+        vf = arg_value(cmd, "-vf")
+        assert vf.startswith("scale=1080:1920:force_original_aspect_ratio=increase,")
+        assert "crop=1080:1920" in vf
+        assert has_pair(cmd, "-frames:v", "1")
+        assert cmd[-1] == "out.png"

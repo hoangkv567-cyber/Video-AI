@@ -328,6 +328,63 @@ def test_login_success_sets_cookie_and_redirects(client: TestClient) -> None:
     assert "Tổng quan" in home.text
 
 
+def test_cookie_authenticated_api_mutation_requires_csrf(client: TestClient) -> None:
+    _login(client)
+    home = client.get("/")
+    csrf = _extract_csrf(home.text)
+    headers = {"Idempotency-Key": "csrf-discovery-test"}
+
+    rejected = client.post(
+        "/api/v1/topics/discover",
+        json={"brief": "AI security news"},
+        headers=headers,
+    )
+    assert rejected.status_code == 403
+    assert rejected.json()["code"] == "csrf_rejected"
+
+    accepted = client.post(
+        "/api/v1/topics/discover",
+        json={"brief": "AI security news"},
+        headers={**headers, "X-CSRF-Token": csrf},
+    )
+    assert accepted.status_code == 202
+
+
+def test_cookie_authenticated_creative_delete_requires_csrf(
+    client: TestClient, seeded: dict[str, str]
+) -> None:
+    _login(client)
+    db = SessionLocal()
+    try:
+        creative = Creative(
+            campaign_id=seeded["campaign_id"],
+            state=CreativeState.DRAFT.value,
+            topic_title="CSRF delete test",
+        )
+        db.add(creative)
+        db.commit()
+        creative_id = creative.id
+    finally:
+        db.close()
+    home = client.get("/")
+    csrf = _extract_csrf(home.text)
+
+    rejected = client.delete(f"/api/v1/creatives/{creative_id}")
+    assert rejected.status_code == 403
+    assert rejected.json()["code"] == "csrf_rejected"
+
+    accepted = client.delete(
+        f"/api/v1/creatives/{creative_id}",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert accepted.status_code == 200
+    verify = SessionLocal()
+    try:
+        assert verify.get(Creative, creative_id) is None
+    finally:
+        verify.close()
+
+
 def test_login_wrong_password_rejected(client: TestClient) -> None:
     resp = _login(client, password="wrong-password")
     assert resp.status_code == 401
@@ -374,12 +431,27 @@ def test_publisher_role_blocked_from_brief_form(client: TestClient) -> None:
     assert blocked.status_code == 403
     # Non-mutating pages remain accessible for publishers.
     assert client.get("/publishing").status_code == 200
+    assert 'data-action="delete-creative"' not in client.get("/").text
 
 
 # --- Page rendering ----------------------------------------------------------
 
 
-def test_overview_lists_creatives_states_and_costs(client: TestClient) -> None:
+def test_overview_lists_creatives_states_and_costs(
+    client: TestClient, seeded: dict[str, str]
+) -> None:
+    db = SessionLocal()
+    try:
+        safe_creative = Creative(
+            campaign_id=seeded["campaign_id"],
+            state=CreativeState.DRAFT.value,
+            topic_title="Creative có thể xóa",
+        )
+        db.add(safe_creative)
+        db.commit()
+        safe_creative_id = safe_creative.id
+    finally:
+        db.close()
     _login(client)
     resp = client.get("/")
     assert resp.status_code == 200
@@ -390,6 +462,33 @@ def test_overview_lists_creatives_states_and_costs(client: TestClient) -> None:
     assert "$2.00" in resp.text  # projected
     assert "$0.82" in resp.text  # actual
     assert "$6.00" in resp.text  # cap
+    assert 'data-action="delete-creative"' in resp.text
+    assert 'data-delete-creative-id=' in resp.text
+    assert "Creative có lịch/bài remote" in resp.text
+    assert re.search(r'/static/app\.js\?v=[0-9a-f]{12}', resp.text)
+    assert re.search(r'/static/style\.css\?v=[0-9a-f]{12}', resp.text)
+    blocked_button = re.search(
+        rf'<button[^>]*data-delete-creative-id="{re.escape(seeded["creative_id"])}"[^>]*>',
+        resp.text,
+        flags=re.DOTALL,
+    )
+    assert blocked_button is not None
+    assert 'aria-disabled="true"' in blocked_button.group(0)
+    assert "data-delete-blocked-message=" in blocked_button.group(0)
+    enabled_button = re.search(
+        rf'<button[^>]*data-delete-creative-id="{re.escape(safe_creative_id)}"[^>]*>',
+        resp.text,
+        flags=re.DOTALL,
+    )
+    assert enabled_button is not None
+    assert "disabled" not in enabled_button.group(0)
+
+    cleanup = SessionLocal()
+    try:
+        cleanup.delete(cleanup.get(Creative, safe_creative_id))
+        cleanup.commit()
+    finally:
+        cleanup.close()
 
 
 def test_connections_page_shows_capability_badges(client: TestClient) -> None:
@@ -402,12 +501,21 @@ def test_connections_page_shows_capability_badges(client: TestClient) -> None:
     assert "/oauth/zalo/start" in resp.text
 
 
+def test_non_admin_can_view_connections_but_not_start_oauth(client: TestClient) -> None:
+    _login(client, email=PUBLISHER_EMAIL)
+    resp = client.get("/connections")
+    assert resp.status_code == 200
+    assert "DIRECT" in resp.text
+    assert "/oauth/youtube/start" not in resp.text
+
+
 def test_brief_form_renders(client: TestClient) -> None:
     _login(client)
     resp = client.get("/briefs/new")
     assert resp.status_code == 200
     assert "Tạo brief mới" in resp.text
     assert "/api/v1/topics/discover" in resp.text
+    assert 'id="discover-form"' in resp.text
 
 
 def test_creative_detail_renders_editor_and_planner(
@@ -426,6 +534,8 @@ def test_creative_detail_renders_editor_and_planner(
     assert "Lời thoại (EN)" in text
     assert "Lời thoại cảnh 1" in text
     assert "Narration scene 1" in text
+    assert 'id="video-plan-data"' in text
+    assert 'data-action="approve-script"' in text
     # Failed scene gets a retry button, progress badges shown
     assert "Thử lại cảnh 3" in text
     assert "failed" in text
@@ -440,7 +550,7 @@ def test_creative_detail_renders_editor_and_planner(
     assert "Kế hoạch xuất bản" in text
     assert "Giờ đăng (Asia/Ho_Chi_Minh)" in text
     assert 'name="platforms" value="youtube"' in text
-    assert "/api/v1/publications" in text
+    assert 'id="publication-form"' in text
 
 
 def test_creative_detail_404_for_unknown_id(client: TestClient) -> None:
@@ -470,8 +580,11 @@ def test_static_assets_served_locally(client: TestClient) -> None:
     css = client.get("/static/style.css")
     assert css.status_code == 200
     assert "--bg" in css.text
-    js = client.get("/static/htmx.min.js")
-    assert js.status_code == 200
+    app_js = client.get("/static/app.js")
+    assert app_js.status_code == 200
+    assert "pollJob" in app_js.text
+    assert "bindCreativeDeletion" in app_js.text
+    assert "deleteBlockedMessage" in app_js.text
 
 
 def test_static_path_traversal_blocked(client: TestClient) -> None:

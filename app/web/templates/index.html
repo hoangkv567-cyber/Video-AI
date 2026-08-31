@@ -28,6 +28,7 @@
           <th>Chi phí thực tế</th>
           <th>Trần chi phí</th>
           <th>Cập nhật</th>
+          <th>Thao tác</th>
         </tr>
       </thead>
       <tbody>
@@ -42,12 +43,30 @@
           <td>${{ "%.2f"|format(cost.actual) }}</td>
           <td>${{ "%.2f"|format(c.cost_cap_usd) }}</td>
           <td>{{ c.updated_at|hcm_time }}</td>
+          <td>
+            {% if can_delete_creatives %}
+              {% set blockers = delete_blockers.get(c.id, []) %}
+              <button type="button"
+                      class="btn btn-danger btn-small"
+                      data-action="delete-creative"
+                      data-delete-creative-id="{{ c.id }}"
+                      data-delete-creative-title="{{ c.topic_title or '(chưa có chủ đề)' }}"
+                      {% if blockers %}data-delete-blocked-message="{{ blockers[0].message }}"{% endif %}
+                      aria-label="Xóa creative {{ c.topic_title or c.id }}"
+                      {% if blockers %}aria-disabled="true" title="{{ blockers[0].message }}"{% endif %}>
+                Xóa
+              </button>
+            {% else %}
+              <span class="muted">—</span>
+            {% endif %}
+          </td>
         </tr>
         {% else %}
-        <tr><td colspan="8" class="muted">Trống</td></tr>
+        <tr><td colspan="9" class="muted">Trống</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+  <div id="creative-delete-result" class="result-area" aria-live="polite"></div>
 </section>
 {% endblock %}

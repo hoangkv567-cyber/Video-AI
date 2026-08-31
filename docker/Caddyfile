@@ -1,5 +1,6 @@
-# Replace videoai.example.com with the real domain before deploying.
-videoai.example.com {
+# Defaults to local HTTP. Set CADDY_ADDRESS to the real domain on the VPS;
+# Caddy will then provision TLS automatically.
+{$CADDY_ADDRESS::80} {
     reverse_proxy web:8000
     encode gzip
 

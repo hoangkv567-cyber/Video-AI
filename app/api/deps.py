@@ -18,7 +18,7 @@ from app.db import get_db
 from app.errors import AppError
 from app.models import User
 from app.states import Role
-from app.web.auth import get_current_user
+from app.web.auth import get_current_user, verify_csrf_token
 
 
 class Unauthorized(AppError):
@@ -31,12 +31,21 @@ class Forbidden(AppError):
     code = "forbidden"
 
 
+class CsrfRejected(AppError):
+    status_code = 403
+    code = "csrf_rejected"
+
+
 def get_api_user(
     request: Request, db: Annotated[Session, Depends(get_db)]
 ) -> User | None:
     """Resolve the caller: session cookie first, X-User-Id header in dev/test."""
     user = get_current_user(request, db)
     if user is not None:
+        if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            token = request.headers.get("X-CSRF-Token", "")
+            if not verify_csrf_token(token, user.id):
+                raise CsrfRejected("missing or invalid CSRF token")
         return user
     if get_settings().app_env in {"dev", "test"}:
         user_id = request.headers.get("X-User-Id")

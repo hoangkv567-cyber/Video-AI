@@ -5,6 +5,8 @@ leaks into the matrix."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.ai.edge_tts_provider import DEFAULT_VOICE_EN, EdgeTTSProvider
@@ -12,12 +14,15 @@ from app.ai.factory import (
     PIPELINE_KEYFRAME_MOTION,
     PIPELINE_VEO,
     build_groq_script_provider,
+    build_image_provider,
     build_script_provider,
     build_tts_provider,
     build_video_pipeline_kind,
+    generation_preflight_issues,
 )
-from app.ai.gemini import GeminiScriptProvider
+from app.ai.gemini import GeminiImageProvider, GeminiScriptProvider
 from app.ai.groq_providers import GroqScriptProvider, GroqTTSProvider
+from app.ai.procedural import ProceduralImageProvider
 from app.ai.tts import GoogleTTSProvider
 from app.config import ModelConfig, Settings
 from app.errors import ValidationFailed
@@ -45,9 +50,9 @@ class TestTTSSelectionMatrix:
         provider = build_tts_provider(locale, make_settings(**{key: choice}), CFG)
         assert type(provider) is expected_type
 
-    def test_free_tier_defaults_are_groq_en_and_edge_vi(self) -> None:
+    def test_free_tier_defaults_use_edge_for_both_locales(self) -> None:
         settings = make_settings()
-        assert type(build_tts_provider("en", settings, CFG)) is GroqTTSProvider
+        assert type(build_tts_provider("en", settings, CFG)) is EdgeTTSProvider
         assert type(build_tts_provider("vi", settings, CFG)) is EdgeTTSProvider
 
     def test_vi_plus_groq_raises_clear_config_error(self) -> None:
@@ -83,6 +88,41 @@ class TestVideoPipelineKind:
             build_video_pipeline_kind(make_settings(video_provider="sora"))
 
 
+class TestGenerationPreflight:
+    def test_default_only_needs_gemini_image_key(self) -> None:
+        issues = generation_preflight_issues(make_settings())
+        assert [issue["code"] for issue in issues] == ["gemini_image_key_missing"]
+
+    def test_groq_terms_are_an_explicit_gate(self) -> None:
+        settings = make_settings(
+            gemini_api_key="k",
+            groq_api_key="k",
+            tts_provider_en="groq",
+            groq_orpheus_terms_accepted=False,
+        )
+        assert [issue["code"] for issue in generation_preflight_issues(settings)] == [
+            "groq_orpheus_terms_required"
+        ]
+
+    def test_ready_free_configuration_has_no_blockers(self) -> None:
+        settings = make_settings(gemini_api_key="k")
+        assert generation_preflight_issues(settings) == []
+
+    def test_procedural_images_do_not_need_a_gemini_key(self) -> None:
+        settings = make_settings(image_provider="procedural")
+        assert generation_preflight_issues(settings) == []
+
+
+class TestImageProvider:
+    def test_gemini_is_the_default(self) -> None:
+        provider = build_image_provider(make_settings(gemini_api_key="k"))
+        assert type(provider) is GeminiImageProvider
+
+    def test_procedural_is_selectable_for_offline_demo(self) -> None:
+        provider = build_image_provider(make_settings(image_provider="procedural"))
+        assert type(provider) is ProceduralImageProvider
+
+
 class TestScriptProviders:
     def test_gemini_is_primary(self) -> None:
         provider = build_script_provider(make_settings(gemini_api_key="k"))
@@ -91,3 +131,53 @@ class TestScriptProviders:
     def test_groq_fallback_constructor_exposed(self) -> None:
         provider = build_groq_script_provider(make_settings(groq_api_key="k"), CFG)
         assert type(provider) is GroqScriptProvider
+
+
+def test_groq_and_edge_model_settings_are_runtime_overridable() -> None:
+    cfg = make_settings(
+        groq_llm_model="replacement-llm",
+        groq_llm_max_completion_tokens=2048,
+        groq_tts_model_en="replacement-tts",
+        groq_tts_voice_en="replacement-voice",
+        groq_whisper_model="replacement-whisper",
+        edge_tts_voice_vi="replacement-vi-voice",
+    ).model_defaults()
+
+    assert cfg.groq_llm_model == "replacement-llm"
+    assert cfg.groq_llm_max_completion_tokens == 2048
+    assert cfg.groq_tts_model_en == "replacement-tts"
+    assert cfg.groq_tts_voice_en == "replacement-voice"
+    assert cfg.groq_whisper_model == "replacement-whisper"
+    assert cfg.edge_tts_voice_vi == "replacement-vi-voice"
+
+
+class TestProceduralModelLabel:
+    def test_procedural_provider_never_reports_paid_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Free backends must not echo the caller's Gemini model id."""
+        import base64
+
+        provider = ProceduralImageProvider()
+
+        def fake_run(*args, **kwargs):
+            png = base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+                "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+            )
+            # Provider requires >500 bytes of output; pad after the signature.
+            png = png + b"\x00" * 600
+            return SimpleNamespace(returncode=0, stdout=png, stderr=b"")
+
+        def no_network(*args, **kwargs):
+            raise OSError("network disabled in test")
+
+        import httpx
+
+        monkeypatch.setattr(httpx, "get", no_network)
+        monkeypatch.setattr("app.ai.procedural.subprocess.run", fake_run)
+        result = provider.generate_image(
+            "cinematic AI chip", model_id="gemini-3.1-flash-image"
+        )
+
+        assert "gemini" not in result.model_id.lower()
