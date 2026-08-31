@@ -20,3 +20,15 @@ bundles/
 .coverage
 htmlcov/
 API.txt
+
+# Local tool metadata and one-off provider responses
+.freebuff/
+*_submit_resp.json
+
+# Private credentials must never be committed
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+service-account*.json
